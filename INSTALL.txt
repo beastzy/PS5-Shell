@@ -10,7 +10,7 @@ To remove the installed Console DE session and its files, run:
 
 Or run it directly from GitHub:
 
-    curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/main/uninstall.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/main/uninstall.sh -o /tmp/ps5-shell-uninstall.sh && sh /tmp/ps5-shell-uninstall.sh
 
 The uninstaller asks before removing files. Steam and system packages remain installed.
 
