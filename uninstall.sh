@@ -16,7 +16,11 @@ fi
 echo "This removes the Console DE session, its installed launchers, udev rule, and configuration/assets for $USER_NAME."
 echo "Steam and system packages are left installed because install.sh does not track which packages were already present."
 printf 'Continue? [y/N] '
-read answer
+if [ -r /dev/tty ]; then
+  read answer </dev/tty
+else
+  read answer
+fi
 case "$answer" in y|Y|yes|YES) ;; *) echo "Cancelled."; exit 0 ;; esac
 
 CFG="$USER_HOME/.config"
