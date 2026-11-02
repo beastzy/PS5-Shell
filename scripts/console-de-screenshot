@@ -1,0 +1,35 @@
+#!/bin/sh
+# Console DE screenshot helper.
+#   console-de-screenshot        whole screen -> ~/Pictures/Screenshots
+#   console-de-screenshot -s     pick a region with slurp first
+#
+# Files land in the same folder GNOME uses for screenshots, so anything
+# captured in Console DE is immediately visible from the GNOME session
+# (~/Pictures/Screenshots) — handy for sharing visual feedback.
+DIR="$HOME/Pictures/Screenshots"
+LOG="$HOME/.cache/console-de-screenshot.log"
+mkdir -p "$DIR" || exit 1
+F="$DIR/screenshot-$(date +%Y-%m-%d-%H%M%S).png"
+log() { echo "$(date '+%F %T') $*" >>"$LOG" 2>/dev/null; }
+
+if [ "$1" = "-s" ]; then
+  GEOM="$(slurp 2>/dev/null)"
+  if [ -z "$GEOM" ]; then log "region selection cancelled"; exit 1; fi
+  if grim -g "$GEOM" "$F" 2>>"$LOG"; then
+    log "saved (region): $F"
+    echo "$F"
+  else
+    log "grim FAILED (region)"
+    exit 1
+  fi
+else
+  if grim "$F" 2>>"$LOG"; then
+    log "saved: $F"
+    echo "$F"
+  else
+    log "grim FAILED — is grim installed and is this a wlroots/wlroots-like session?"
+    exit 1
+  fi
+fi
+# remember the latest capture (doctor shows it)
+echo "$F" > "$HOME/.cache/console-de-last-screenshot" 2>/dev/null || true

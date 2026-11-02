@@ -1,0 +1,40 @@
+#!/bin/sh
+# Console DE quick-reload — test new configs WITHOUT logging out.
+#
+# Run this from a terminal inside the Console DE session (open one with
+# Super+Enter). It:
+#   1. re-runs the installer so ~/.config has the latest files
+#   2. restarts the home shell (picks up shell.py, gamepad, scale, sfx)
+#   3. tells labwc to re-read rc.xml (keybinds) via SIGHUP
+#
+# Still needs a real re-login (rare): session env vars, autostart file,
+# udev rules, user-group changes.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+DEFAULT_REPO="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+REPO="${CONSOLE_DE_REPO:-$DEFAULT_REPO}"
+LOG="$HOME/.cache/console-de-reload.log"
+
+echo "== 1/3 deploying configs =="
+if [ -d "$REPO" ]; then
+  sh "$REPO/install.sh" 2>&1 | tee -a "$LOG" | grep -E "updated:|!!" || echo "   (nothing changed)"
+else
+  echo "!! source repo not found at $REPO"
+  echo "   Set CONSOLE_DE_REPO to the repository directory and retry."
+  exit 1
+fi
+
+echo "== 2/3 restarting home shell =="
+pkill -f "console-de/home-music" 2>/dev/null || true   # stop ambient music loop
+pkill -f "console-de/shell.py" 2>/dev/null || true
+sleep 0.4
+nohup console-de-shell >/dev/null 2>&1 &
+echo "   shell restarted (gamepad pads re-grabbed automatically)"
+
+echo "== 3/3 reloading labwc keybinds =="
+if pkill -HUP labwc 2>/dev/null; then
+  echo "   rc.xml reloaded"
+else
+  echo "   (labwc not running here — keybinds reload on next login)"
+fi
+
+echo "done — new UI is live."

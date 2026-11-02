@@ -1,0 +1,27 @@
+#!/bin/sh
+# Console DE session starter — registered in /usr/share/wayland-sessions.
+export XDG_CURRENT_DESKTOP=console-de
+export XDG_SESSION_DESKTOP=console-de
+export XDG_SESSION_TYPE=wayland
+export QT_QPA_PLATFORM=wayland
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export GDK_BACKEND=wayland,x11
+export SDL_VIDEODRIVER=wayland
+export MOZ_ENABLE_WAYLAND=1
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+# ---- display scaling (200%) ----
+# GDK_SCALE doubles GTK app sizes (shell, settings, wofi, waybar…).
+# Change via Settings > Display scale in the shell, or edit by hand.
+SCALE=2
+[ -f "$HOME/.config/console-de/scale" ] && SCALE="$(cat "$HOME/.config/console-de/scale")"
+export GDK_SCALE="$SCALE"
+export GDK_DPI_SCALE=1
+export QT_SCALE_FACTOR="$SCALE"
+
+# leave a fingerprint so console-de-doctor can show which session ran
+mkdir -p "$HOME/.cache"
+echo "console-de-session started $(date '+%F %T') scale=$SCALE" \
+  >> "$HOME/.cache/console-de-autostart.log"
+
+exec labwc

@@ -1,0 +1,121 @@
+#!/bin/sh
+# Console DE diagnostics — collects everything into one file.
+# Run it from ANY session (GNOME or Console DE), then share the output.
+OUT="$HOME/.cache/console-de-doctor.txt"
+
+{
+echo "== when / where =="
+date
+echo "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP"
+echo "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY  DISPLAY=$DISPLAY"
+echo
+echo "== distro =="
+head -4 /etc/os-release 2>/dev/null
+echo
+echo "== scale =="
+echo "GDK_SCALE (this shell)=$GDK_SCALE"
+echo "scale file: $(cat "$HOME/.config/console-de/scale" 2>/dev/null || echo 'MISSING (defaults to 2)')"
+echo
+echo "== binaries =="
+for b in labwc waybar wofi swaybg foot grim slurp brightnessctl wpctl steam python3 pw-play paplay ffmpeg ffplay console-de-shell console-de-env console-de-power; do
+  printf '%-18s %s\n' "$b" "$(command -v "$b" 2>/dev/null || echo '*** MISSING ***')"
+done
+echo
+echo "== audio output =="
+if command -v wpctl >/dev/null 2>&1; then
+  wpctl status 2>&1 | sed -n '1,32p'
+elif command -v pactl >/dev/null 2>&1; then
+  pactl info 2>&1 | sed -n '1,16p'
+else
+  echo "No PipeWire/PulseAudio status tool found"
+fi
+echo
+echo "== gamepad access =="
+ls -l /dev/uinput 2>/dev/null || echo '/dev/uinput MISSING (gamepad daemon cannot inject keys)'
+[ -w /dev/uinput ] && echo '/dev/uinput is writable by this user: yes' || echo '/dev/uinput writable by this user: NO (need udev rule + input group)'
+groups | tr ' ' '\n' | grep -x input >/dev/null && echo "user in 'input' group: yes" || echo "user in 'input' group: NO (log out/in after install)"
+echo "-- controllers found:"
+grep -l . /dev/input/event* >/dev/null 2>&1
+python3 - <<'EOF' 2>&1 | tail -8
+try:
+    import evdev, glob
+    from evdev import ecodes
+    for p in sorted(glob.glob("/dev/input/event*")):
+        try:
+            d = evdev.InputDevice(p)
+        except Exception:
+            continue
+        k = d.capabilities().get(ecodes.EV_KEY, [])
+        if ecodes.BTN_SOUTH in k and ecodes.BTN_START in k:
+            print("pad:", d.name, p)
+except Exception as e:
+    print("(evdev probe failed:", e, ")")
+EOF
+echo
+echo "== labwc version =="
+labwc --version 2>&1 | head -2
+echo
+echo "== python GTK (home shell dependency) =="
+python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk; print('GTK OK', Gtk.get_major_version(), Gtk.get_minor_version())" 2>&1 | tail -3
+echo "== python evdev (gamepad dependency) =="
+python3 -c "import evdev; print('evdev OK')" 2>&1 | tail -2
+echo
+echo "== home shell import check =="
+python3 - <<'EOF' 2>&1 | tail -6
+import importlib.util, os
+p = os.path.expanduser("~/.config/console-de/shell.py")
+if not os.path.isfile(p):
+    print("*** shell.py not installed at", p)
+else:
+    spec = importlib.util.spec_from_file_location("shell", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    print("shell.py imports OK")
+EOF
+echo
+echo "== configs well-formed =="
+python3 -c "
+import xml.dom.minidom as x
+x.parse('$HOME/.config/labwc/rc.xml'); x.parse('$HOME/.config/labwc/menu.xml')
+print('rc.xml / menu.xml OK')" 2>&1 | tail -2
+ls "$HOME/.config/waybar/config" "$HOME/.config/console-de/gamepad.py" 2>&1
+echo
+echo "== installed configs vs source =="
+SOURCE_ROOT="${CONSOLE_DE_SOURCE:-}"
+if [ -n "$SOURCE_ROOT" ] && [ -d "$SOURCE_ROOT/config" ]; then
+  for f in console-de/shell.py console-de/gamepad.py labwc/rc.xml labwc/autostart; do
+    a="$HOME/.config/$f"; b="$SOURCE_ROOT/config/$f"
+    if [ -f "$a" ] && [ -f "$b" ]; then
+      if cmp -s "$a" "$b"; then echo "OK   $f"; else echo "DIFF $f  (installed != source — re-run install.sh)"; fi
+    else echo "MISS $f (installed: $([ -f "$a" ] && echo yes || echo NO), source: $([ -f "$b" ] && echo yes || echo NO))"; fi
+  done
+else
+  echo "Set CONSOLE_DE_SOURCE to the repository folder to compare installed files."
+fi
+echo
+echo "== session registered =="
+ls -l /usr/share/wayland-sessions/ 2>/dev/null
+echo
+echo "== autostart log (last 40) =="
+tail -40 "$HOME/.cache/console-de-autostart.log" 2>/dev/null || echo "(no autostart log — Console DE session never started?)"
+echo
+echo "== shell log (last 20) =="
+tail -20 "$HOME/.cache/console-de-shell.log" 2>/dev/null || echo "(no shell log)"
+echo
+echo "== gamepad log (last 30) =="
+tail -30 "$HOME/.cache/console-de-gamepad.log" 2>/dev/null || echo "(no gamepad log — daemon never attached a pad)"
+echo
+echo "== recent pad buttons (shell log) =="
+grep -E "pad button:|unmapped pad button" "$HOME/.cache/console-de-shell.log" 2>/dev/null | tail -15 || echo "(none — press LB/RB then re-run doctor)"
+echo
+echo "== screenshots =="
+ls -t "$HOME/Pictures/Screenshots"/*.png 2>/dev/null | head -3 || echo "(none yet — Print key / SHARE button / Settings > Screenshot)"
+cat "$HOME/.cache/console-de-last-screenshot" 2>/dev/null
+echo
+echo "== session journal errors =="
+journalctl --user -b --no-pager 2>/dev/null | grep -iE 'labwc|waybar|shell\.py|gamepad|console-de|wofi' | tail -30
+} > "$OUT" 2>&1
+
+echo "Diagnostics written to: $OUT"
+echo "Open it with:  cat $OUT"

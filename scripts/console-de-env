@@ -1,0 +1,12 @@
+#!/bin/sh
+# Launch a command with Console DE's current display scaling applied.
+# Used by labwc keybinds (wofi, foot, …) so a scale change in
+# Settings applies to newly launched apps without re-logging in.
+CFG="$HOME/.config/console-de"
+SCALE=2
+[ -f "$CFG/scale" ] && SCALE="$(cat "$CFG/scale")"
+case "$SCALE" in ''|*[!0-9]*) SCALE=2 ;; esac
+export GDK_SCALE="$SCALE"
+export GDK_DPI_SCALE=1
+export QT_SCALE_FACTOR="$SCALE"
+exec "$@"

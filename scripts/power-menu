@@ -1,0 +1,25 @@
+#!/bin/sh
+# Console DE power menu — reachable from the ⏻ button (bar), PS button (pad),
+# or bound keys. "Log out" returns to the GDM login screen.
+# `console-de-power logout` skips the menu and logs out directly
+# (bound to Ctrl+Alt+Delete).
+case "$1" in
+  logout)
+    loginctl terminate-session "${XDG_SESSIONID:-self}" 2>/dev/null \
+      || pkill -x labwc 2>/dev/null \
+      || true
+    exit 0 ;;
+esac
+CHOICE=$(printf 'Log out\nLock\nSuspend\nReboot\nPower off\nCancel' | wofi --dmenu --prompt "Power" \
+  --width 260 --height 260)
+case "$CHOICE" in
+  "Log out")
+    # end the session cleanly -> back to the GDM login screen
+    loginctl terminate-session "${XDG_SESSIONID:-self}" 2>/dev/null \
+      || pkill -x labwc 2>/dev/null \
+      || true ;;
+  Lock) loginctl lock-session ;;
+  Suspend) systemctl suspend ;;
+  Reboot) systemctl reboot ;;
+  "Power off") systemctl poweroff ;;
+esac

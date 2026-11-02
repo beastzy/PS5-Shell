@@ -1,0 +1,6 @@
+#!/bin/sh
+# Launch the Console DE home shell (PS5-style). Safe to re-run: a
+# running instance raises its window instead of starting a second one.
+# (The shell pins its own GDK_SCALE baseline and zooms its UI from
+# ~/.config/console-de/scale — Display scale applies instantly.)
+exec python3 "$HOME/.config/console-de/shell.py" "$@"
