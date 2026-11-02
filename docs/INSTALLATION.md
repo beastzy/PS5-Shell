@@ -35,6 +35,8 @@ The first startup shows the PS5 Shell introduction before the Games and Apps int
 
 Extract or clone the newer repository and run `sh install.sh` again. The installer refreshes its tracked config files when their contents differ and merges bundled icons and sounds. Back up any personal edits to files under `~/.config/labwc` or `~/.config/console-de` first; changed defaults can replace those files.
 
+The installer records the installed Git commit. To compare it with GitHub's latest `main` commit later, open **Settings → About → Check for Updates** while online. Git clones record their exact commit; source archives record the public `main` revision seen during installation. Older installations without a recorded revision need one installer rerun before the comparison is available.
+
 Log out and back in to load the refreshed shell and session configuration.
 
 ## Optional features
@@ -50,12 +52,6 @@ Clone or download the repository and run the uninstaller as your regular user:
 
 ```sh
 sh uninstall.sh
-```
-
-Or run it directly from GitHub:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/main/uninstall.sh -o /tmp/ps5-shell-uninstall.sh && sh /tmp/ps5-shell-uninstall.sh
 ```
 
 It asks for confirmation, then removes the Console DE session entry, installed launchers, udev rule, and Console DE configuration/assets. Steam and system packages remain installed because the installer does not track which packages were already present. Log out or restart the display manager after removal.
