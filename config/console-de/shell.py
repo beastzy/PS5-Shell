@@ -285,11 +285,25 @@ def take_screenshot():
 def _steam_library_paths():
     """Discover all Steam library folders (including external drives)."""
     paths = set()
+    data_home = os.environ.get(
+        "XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
     candidates = [
+        os.environ.get("STEAM_COMPAT_CLIENT_INSTALL_PATH", ""),
+        os.path.expanduser("~/.steam/root"),
         os.path.expanduser("~/.steam/steam"),
-        os.path.expanduser("~/.local/share/Steam"),
+        os.path.join(data_home, "Steam"),
+        os.path.expanduser(
+            "~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
+        os.path.expanduser(
+            "~/.var/app/com.valvesoftware.Steam/data/Steam"),
+        "/usr/share/steam",
+        "/usr/share/Steam",
+        "/opt/steam",
     ]
     for base in candidates:
+        if not base or not os.path.isdir(base):
+            continue
+        base = os.path.realpath(os.path.expanduser(base))
         vdf = os.path.join(base, "steamapps", "libraryfolders.vdf")
         if os.path.exists(vdf):
             try:
@@ -298,14 +312,14 @@ def _steam_library_paths():
                 for m in re.finditer(r'"path"\s+"([^"]+)"', content):
                     p = m.group(1).replace('\\\\', '/')
                     if os.path.exists(p):
-                        paths.add(p)
+                        paths.add(os.path.realpath(p))
             except Exception:
                 pass
         # Default steamapps
         sa = os.path.join(base, "steamapps")
         if os.path.exists(sa):
             paths.add(base)
-    return list(paths)
+    return sorted(paths)
 
 
 def _art_candidates(appid, prefer):
@@ -579,10 +593,8 @@ class GradientBG(Gtk.DrawingArea):
 def list_steam_games():
     games = []
     seen_appids = set()
-    steam_paths = [
-        os.path.expanduser("~/.steam/steam/steamapps"),
-        os.path.expanduser("~/.local/share/Steam/steamapps"),
-    ]
+    steam_paths = [os.path.join(lib, "steamapps")
+                   for lib in _steam_library_paths()]
     skip_names = {'Proton', 'Steamworks Common Redist', 'Steam Linux Runtime',
                   'Steam Linux Runtime - Soldier', 'Steam Linux Runtime - Sniper',
                   'Proton Hotfix', 'Proton Experimental', 'SteamVR'}
@@ -642,6 +654,23 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def __init__(self, app):
         super().__init__(application=app, title="Console DE")
+        screen = Gdk.Screen.get_default()
+        self._primary_monitor_idx = 0
+        self._primary_monitor = None
+        if screen:
+            try:
+                self._primary_monitor_idx = screen.get_primary_monitor()
+            except Exception:
+                pass
+            if self._primary_monitor_idx < 0:
+                self._primary_monitor_idx = 0
+            try:
+                display = Gdk.Display.get_default()
+                if display:
+                    self._primary_monitor = display.get_monitor(
+                        self._primary_monitor_idx)
+            except Exception:
+                pass
         self._shell_layer_shell = _layer_shell_available()
         if self._shell_layer_shell:
             # Keep the DE on a compositor-managed layer so Control Center's
@@ -649,6 +678,12 @@ class ShellWindow(Gtk.ApplicationWindow):
             GtkLayerShell.init_for_window(self)
             GtkLayerShell.set_namespace(self, "console-de-shell")
             GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+            if self._primary_monitor is not None:
+                try:
+                    GtkLayerShell.set_monitor(self, self._primary_monitor)
+                    _log(f"Shell assigned to primary monitor {self._primary_monitor_idx}")
+                except Exception as exc:
+                    _log(f"Could not assign primary monitor to shell layer: {exc}")
             GtkLayerShell.set_keyboard_mode(
                 self, GtkLayerShell.KeyboardMode.ON_DEMAND)
             GtkLayerShell.set_exclusive_zone(self, -1)
@@ -658,7 +693,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         elif (HAVE_LAYER_SHELL and
               os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"):
             _log("Compositor has no Layer Shell protocol; using standard GTK windows")
-        self.fullscreen()
         # Keep the DE above startup applications such as Steam. Steam may show
         # a first-run/update window even when launched with -silent.
         self.set_keep_above(True)
@@ -679,9 +713,20 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._game_check_timer_id = None
 
         # Get actual screen dimensions for responsive sizing
-        screen = Gdk.Screen.get_default()
-        self._sw = screen.get_width() if screen else 1920
-        self._sh = screen.get_height() if screen else 1080
+        if screen:
+            try:
+                geometry = screen.get_monitor_geometry(self._primary_monitor_idx)
+                self._sw, self._sh = geometry.width, geometry.height
+            except Exception:
+                self._sw = screen.get_width()
+                self._sh = screen.get_height()
+        else:
+            self._sw, self._sh = 1920, 1080
+        if not self._shell_layer_shell:
+            if screen and hasattr(self, "fullscreen_on_monitor"):
+                self.fullscreen_on_monitor(screen, self._primary_monitor_idx)
+            else:
+                self.fullscreen()
         resolution_factor = min(
             self._sw / _REFERENCE_WIDTH,
             self._sh / _REFERENCE_HEIGHT)
@@ -717,6 +762,9 @@ class ShellWindow(Gtk.ApplicationWindow):
         # Remember game order across restarts (promoted games stay at front)
         self._load_game_order()
         self.settings_sel = 0
+        self._update_check_status = "Press A to check"
+        self._update_check_running = False
+        self._installed_commit = self._read_installed_commit()
         # Cairo carousel state (PS5 tile belt model)
         self._car_tile = self._sw_pct(8)         # base tile size
         self._car_gap = self._sw_pct(1.5)        # gap between tiles
@@ -897,6 +945,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(500, self._init_gamepad)
         self._gamepad_monitor_id = GLib.timeout_add(
             1000, self._monitor_gamepad_connection)
+        self._steam_game_refresh_timer_id = GLib.timeout_add_seconds(
+            4, self._refresh_steam_game_list)
         # Launch audio pipeline once the window is visible
         GLib.timeout_add(100, self._start_music)
         # Ensure Steam is running in background (not suspended) for fast launches
@@ -1199,6 +1249,12 @@ class ShellWindow(Gtk.ApplicationWindow):
             GtkLayerShell.init_for_window(self.control_center_window)
             GtkLayerShell.set_namespace(
                 self.control_center_window, "console-de-control-center")
+            if self._primary_monitor is not None:
+                try:
+                    GtkLayerShell.set_monitor(
+                        self.control_center_window, self._primary_monitor)
+                except Exception as exc:
+                    _log(f"Could not assign Control Center to primary monitor: {exc}")
             GtkLayerShell.set_layer(
                 self.control_center_window, GtkLayerShell.Layer.OVERLAY)
             GtkLayerShell.set_exclusive_zone(self.control_center_window, -1)
@@ -1563,7 +1619,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.set_accept_focus(True)
         self.set_keep_above(True)
         self.deiconify()
-        self.fullscreen()
+        self._fullscreen_primary_monitor()
         self.show()
         self.present()
         self.present_with_time(Gdk.CURRENT_TIME)
@@ -1617,7 +1673,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._set_shell_layer("overlay")
         self.set_keep_above(True)
         self.deiconify()
-        self.fullscreen()
+        self._fullscreen_primary_monitor()
         self.show()
         self.present()
         self.present_with_time(Gdk.CURRENT_TIME)
@@ -1626,6 +1682,17 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._schedule_home_foreground()
         _log("DE raised through the shared Home action")
         return False
+
+    def _fullscreen_primary_monitor(self):
+        """Keep GTK fallback fullscreening scoped to the selected output."""
+        if self._shell_layer_shell:
+            # The layer surface is already anchored to its primary monitor.
+            return
+        screen = Gdk.Screen.get_default()
+        if screen and hasattr(self, "fullscreen_on_monitor"):
+            self.fullscreen_on_monitor(screen, self._primary_monitor_idx)
+        else:
+            self.fullscreen()
 
     def _gnome_shell_eval(self, script):
         """Run a small GNOME Shell window-management action when available."""
@@ -2652,6 +2719,10 @@ class ShellWindow(Gtk.ApplicationWindow):
             {"name": "About", "options": [
                 {"label": "Console DE", "get": lambda: "PS5 Shell 1.0",
                  "cb": None},
+                {"label": "Installed Build", "get": self._get_installed_build_label,
+                 "cb": None},
+                {"label": "Check for Updates", "get": lambda: self._update_check_status,
+                 "cb": self._check_for_updates, "action": True},
                 {"label": "Resolution",
                  "get": lambda: f"{self._sw}×{self._sh}", "cb": None},
             ]},
@@ -2670,6 +2741,73 @@ class ShellWindow(Gtk.ApplicationWindow):
                  "cb": None},
             ]},
         ]
+
+    def _read_installed_commit(self):
+        path = os.path.expanduser("~/.config/console-de/install_commit")
+        try:
+            with open(path, encoding="ascii") as version_file:
+                commit = version_file.read().strip().lower()
+            if re.fullmatch(r"[0-9a-f]{40}", commit):
+                return commit
+        except OSError:
+            pass
+        return None
+
+    def _get_installed_build_label(self):
+        return self._installed_commit[:7] if self._installed_commit else "Unknown"
+
+    def _check_for_updates(self):
+        if self._update_check_running:
+            return
+        if not self._installed_commit:
+            self._update_check_status = "Reinstall to record build"
+            self._refresh_update_status_row()
+            return
+
+        self._update_check_running = True
+        self._update_check_status = "Checking…"
+        self._refresh_update_status_row()
+        installed_commit = self._installed_commit
+
+        def check_worker():
+            try:
+                from urllib.request import Request, urlopen
+                url = ("https://api.github.com/repos/beastzy/PS5-Shell/compare/"
+                       f"{installed_commit}...main")
+                request = Request(url, headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "PS5-Shell-update-check",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                })
+                with urlopen(request, timeout=8) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                newer = int(result.get("ahead_by", 0))
+                latest = result.get("head", {}).get("sha", "")[:7]
+                if newer:
+                    message = f"{newer} newer commit{'s' if newer != 1 else ''} · {latest}"
+                else:
+                    message = f"Up to date · {latest}"
+            except Exception as exc:
+                _log(f"Update check failed: {exc}")
+                message = "Check failed · try again"
+            GLib.idle_add(self._finish_update_check, message)
+
+        threading.Thread(target=check_worker, daemon=True,
+                         name="console-de-update-check").start()
+
+    def _finish_update_check(self, message):
+        self._update_check_running = False
+        self._update_check_status = message
+        self._refresh_update_status_row()
+        return False
+
+    def _refresh_update_status_row(self):
+        for row in getattr(self, "settings_rows", []):
+            label = row["label"].get_text()
+            if label == "Check for Updates":
+                row["value_label"].set_text(self._update_check_status)
+            elif label == "Installed Build":
+                row["value_label"].set_text(self._get_installed_build_label())
 
     def _create_settings_page(self):
         self.settings_data = self._build_settings_data()
@@ -3456,6 +3594,7 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _on_logout(self):
         _log("Settings: Log Out")
+        self._stop_music()
         sh(["pkill", "-TERM", "-x", "labwc"])
         self.destroy()
 
@@ -4970,6 +5109,12 @@ class ShellWindow(Gtk.ApplicationWindow):
                 ["sh", "-c", cmd],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, preexec_fn=_preexec)
+            try:
+                os.makedirs(os.path.expanduser("~/.cache"), exist_ok=True)
+                with open(self._music_pgid_file(), "w", encoding="ascii") as pgid_file:
+                    pgid_file.write(f"{self._music_proc.pid}\n")
+            except OSError as exc:
+                _log(f"Could not save home-music process group: {exc}")
             _log(f"Music pipeline started: {menu}")
         except Exception as e:
             _log(f"Music start failed: {e}")
@@ -5137,6 +5282,44 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.games = ordered
             _log(f"Restored saved game order ({len(saved_appids)} games)")
             self.gsel = 0
+
+    def _refresh_steam_game_list(self):
+        """Rescan Steam manifests so late mounts/Steam startup appear in Games."""
+        self._steam_game_refresh_timer_id = None
+        try:
+            selected_appid = (self.games[self.gsel].get("appid")
+                              if self.games and 0 <= self.gsel < len(self.games)
+                              else None)
+            discovered = list_steam_games()
+            old_games = {game.get("appid"): game.get("name")
+                         for game in self.games}
+            new_games = {game.get("appid"): game.get("name")
+                         for game in discovered}
+            if old_games != new_games:
+                self.games = discovered
+                self._load_game_order()
+                if selected_appid is not None:
+                    self.gsel = next((i for i, game in enumerate(self.games)
+                                      if game.get("appid") == selected_appid),
+                                     min(self.gsel, max(0, len(self.games) - 1)))
+                elif self.games:
+                    self.gsel = min(self.gsel, len(self.games) - 1)
+                else:
+                    self.gsel = 0
+                self._load_carousel_pixbufs()
+                if self.games:
+                    self._refresh_selection()
+                else:
+                    self._update_game_info()
+                    self._update_play_button_label()
+                if hasattr(self, "carousel"):
+                    self.carousel.queue_draw()
+                _log(f"Steam game list refreshed: {len(self.games)} games")
+        except Exception as exc:
+            _log(f"Steam game-list refresh failed: {exc}")
+        self._steam_game_refresh_timer_id = GLib.timeout_add_seconds(
+            30, self._refresh_steam_game_list)
+        return False
 
     def _save_game_order(self):
         """Persist current game order so promoted games stay at front."""
@@ -5580,6 +5763,11 @@ class ShellWindow(Gtk.ApplicationWindow):
             cover.set_accept_focus(False)
             GtkLayerShell.init_for_window(cover)
             GtkLayerShell.set_namespace(cover, "console-de-launch-cover")
+            if self._primary_monitor is not None:
+                try:
+                    GtkLayerShell.set_monitor(cover, self._primary_monitor)
+                except Exception as exc:
+                    _log(f"Could not assign launch cover to primary monitor: {exc}")
             GtkLayerShell.set_layer(cover, GtkLayerShell.Layer.OVERLAY)
             GtkLayerShell.set_keyboard_mode(
                 cover, GtkLayerShell.KeyboardMode.NONE)
@@ -5912,7 +6100,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                      "_background_suspend_timer",
                      "_cursor_hide_timer", "_focus_restore_timer",
                      "_microphone_monitor_id", "_settings_stats_timer_id",
-                     "_process_log_timer_id",
+                     "_process_log_timer_id", "_steam_game_refresh_timer_id",
                      "_status_notice_fade_id", "_status_notice_dismiss_id"):
             timer_id = getattr(self, attr, None)
             if timer_id is not None:
@@ -6075,7 +6263,15 @@ class ShellWindow(Gtk.ApplicationWindow):
                 pass
         self._music_proc = None
         self._music_paused = False
+        try:
+            os.unlink(self._music_pgid_file())
+        except OSError:
+            pass
         _log("Music stopped")
+
+    @staticmethod
+    def _music_pgid_file():
+        return os.path.expanduser("~/.cache/console-de-home-music.pgid")
 
     def _on_focus_out(self, widget, event):
         """DE lost focus; keep the launch curtain until the game is ready."""
