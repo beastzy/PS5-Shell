@@ -191,6 +191,8 @@ copy "$SRC/config/console-de/shell.py"       "$CFG/console-de/shell.py"
 copy "$SRC/config/console-de/cursor_hide.py" "$CFG/console-de/cursor_hide.py"
 sudo -u "$USER_NAME" chmod +x "$CFG/console-de/gamepad.py" "$CFG/console-de/shell.py"
 sudo -u "$USER_NAME" chmod +x "$CFG/console-de/cursor_hide.py"
+copy "$SRC/config/console-de/labwc-output-scale.py" \
+     "$CFG/console-de/labwc-output-scale.py"
 copy_tree "$SRC/config/console-de/icons"     "$CFG/console-de/icons"
 copy_tree "$SRC/config/console-de/sfx"       "$CFG/console-de/sfx"
 copy "$SRC/config/console-de/settings_startup_gradient.png" \
@@ -199,6 +201,12 @@ copy "$SRC/config/console-de/status_notice_controller_bg.png" \
      "$CFG/console-de/status_notice_controller_bg.png"
 copy "$SRC/config/console-de/status_notice_microphone_bg.png" \
      "$CFG/console-de/status_notice_microphone_bg.png"
+copy "$SRC/config/console-de/status_notice_controller_icon.png" \
+     "$CFG/console-de/status_notice_controller_icon.png"
+copy "$SRC/config/console-de/status_notice_battery_outline.png" \
+     "$CFG/console-de/status_notice_battery_outline.png"
+copy "$SRC/config/console-de/status_notice_microphone_icon.png" \
+     "$CFG/console-de/status_notice_microphone_icon.png"
 copy "$SRC/config/console-de/confirm.wav"    "$CFG/console-de/confirm.wav"
 copy "$SRC/config/console-de/select.wav"      "$CFG/console-de/select.wav"
 # Record the installed source revision for Settings → About update checks.
