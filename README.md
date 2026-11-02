@@ -46,6 +46,12 @@ Clone or download the repository, then run:
 sh uninstall.sh
 ```
 
+Or run the uninstaller directly from GitHub:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/main/uninstall.sh | sh
+```
+
 The script asks before removing the Console DE session, installed launchers, udev rule, and its configuration/assets. Steam and system packages are left installed because the installer does not record which packages were already present.
 
 ## Controls
