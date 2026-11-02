@@ -4,6 +4,12 @@ The installer is in this folder. Run it as your regular user:
 
     sh install.sh
 
+To remove the installed Console DE session and its files, run:
+
+    sh uninstall.sh
+
+The uninstaller asks before removing files. Steam and system packages remain installed.
+
 It uses sudo for system packages and session setup. When it completes, log
 out and choose “Console DE” from the session menu at GDM. This is the installed
 session's technical name; the project is presented as PS5 Shell.
