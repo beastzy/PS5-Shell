@@ -201,6 +201,29 @@ copy "$SRC/config/console-de/status_notice_microphone_bg.png" \
      "$CFG/console-de/status_notice_microphone_bg.png"
 copy "$SRC/config/console-de/confirm.wav"    "$CFG/console-de/confirm.wav"
 copy "$SRC/config/console-de/select.wav"      "$CFG/console-de/select.wav"
+# Record the installed source revision for Settings → About update checks.
+# Git checkouts have an exact revision. GitHub source archives omit .git, so
+# use the public main-branch revision available at install time as their ID.
+BUILD_COMMIT=""
+if git -C "$SRC" rev-parse --verify HEAD >/dev/null 2>&1; then
+  BUILD_COMMIT="$(git -C "$SRC" rev-parse --verify HEAD 2>/dev/null)"
+else
+  BUILD_COMMIT="$(python3 -c 'import json, urllib.request; r=urllib.request.Request("https://api.github.com/repos/beastzy/PS5-Shell/commits/main", headers={"User-Agent":"PS5-Shell-installer"}); print(json.load(urllib.request.urlopen(r, timeout=6))["sha"])' 2>/dev/null || true)"
+fi
+case "$BUILD_COMMIT" in
+  *[!0-9a-fA-F]*|"")
+    echo "-- could not record the installed GitHub revision; update comparison will be unavailable"
+    ;;
+  *)
+    if [ "${#BUILD_COMMIT}" -eq 40 ]; then
+      printf '%s\n' "$BUILD_COMMIT" | sudo -u "$USER_NAME" tee "$CFG/console-de/install_commit" >/dev/null
+      BUILD_COMMIT_SHORT="$(printf '%s' "$BUILD_COMMIT" | cut -c1-7)"
+      echo "-- installed revision: $BUILD_COMMIT_SHORT"
+    else
+      echo "-- GitHub returned an invalid revision; update comparison will be unavailable"
+    fi
+    ;;
+esac
 # foot terminal theme (200% font)
 if [ ! -f "$CFG/foot/foot.ini" ]; then
   copy "$SRC/config/foot/foot.ini" "$CFG/foot/foot.ini"
