@@ -1,0 +1,7 @@
+show=drun
+width=560
+height=480
+prompt=Launch
+allow_images=true
+image_size=28
+insensitive=true

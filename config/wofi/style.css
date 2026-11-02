@@ -1,0 +1,22 @@
+/* Console DE — wofi launcher */
+window {
+  margin: 0px;
+  border: 2px solid #0070d1;
+  border-radius: 16px;
+  background-color: #0a0e1a;
+  font-family: "DejaVu Sans", sans-serif;
+  font-size: 16px;
+}
+#input {
+  margin: 14px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 10px;
+  color: #ffffff;
+  background-color: #111830;
+}
+#input:focus { background-color: #12203c; }
+#inner-box { margin: 6px 8px; }
+#entry { padding: 8px 12px; border-radius: 8px; color: #d7e1f5; }
+#entry:selected { background-color: #0070d1; color: #ffffff; }
+#text { margin: 0 8px; }
