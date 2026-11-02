@@ -3,8 +3,28 @@
 # or bound keys. "Log out" returns to the GDM login screen.
 # `console-de-power logout` skips the menu and logs out directly
 # (bound to Ctrl+Alt+Delete).
+stop_home_music() {
+  pidfile="$HOME/.cache/console-de-home-music.pgid"
+  [ -r "$pidfile" ] || return 0
+  pgid="$(cat "$pidfile" 2>/dev/null)"
+  case "$pgid" in
+    ""|*[!0-9]*) rm -f "$pidfile"; return 0 ;;
+  esac
+
+  # Only signal the recorded group if its leader is still the shell command
+  # that runs the PS5 menu track. This avoids signaling a recycled process ID.
+  if [ -r "/proc/$pgid/cmdline" ] &&
+      tr '\000' ' ' <"/proc/$pgid/cmdline" | grep -Fq 'PS5_Home_Menu.mp3'; then
+    kill -TERM -"$pgid" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL -"$pgid" 2>/dev/null || true
+  fi
+  rm -f "$pidfile"
+}
+
 case "$1" in
   logout)
+    stop_home_music
     loginctl terminate-session "${XDG_SESSIONID:-self}" 2>/dev/null \
       || pkill -x labwc 2>/dev/null \
       || true
@@ -15,6 +35,7 @@ CHOICE=$(printf 'Log out\nLock\nSuspend\nReboot\nPower off\nCancel' | wofi --dme
 case "$CHOICE" in
   "Log out")
     # end the session cleanly -> back to the GDM login screen
+    stop_home_music
     loginctl terminate-session "${XDG_SESSIONID:-self}" 2>/dev/null \
       || pkill -x labwc 2>/dev/null \
       || true ;;
