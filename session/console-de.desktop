@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Console DE
+Comment=Controller-first console-style desktop (labwc + GTK3/PyGObject shell)
+Exec=/usr/local/bin/console-de-session
+Type=Application
+DesktopNames=console-de;wlroots
