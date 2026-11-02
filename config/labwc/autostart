@@ -1,0 +1,43 @@
+#!/bin/sh
+# Console DE autostart — started by labwc. Errors go to the log, not screen.
+LOG="$HOME/.cache/console-de-autostart.log"
+mkdir -p "$HOME/.cache"
+
+# ---- display scaling ----
+# Applied here as well (not only in console-de-session) so GTK apps are
+# scaled even if the plain 'labwc' session entry was picked at login.
+SCALE=2
+[ -f "$HOME/.config/console-de/scale" ] && SCALE="$(cat "$HOME/.config/console-de/scale")"
+case "$SCALE" in ''|*[!0-9]*) SCALE=2 ;; esac
+export GDK_SCALE="$SCALE"
+export GDK_DPI_SCALE=1
+export QT_SCALE_FACTOR="$SCALE"
+
+echo "=== autostart $(date '+%F %T') desktop=${XDG_CURRENT_DESKTOP:-unset} scale=$SCALE ===" >>"$LOG"
+
+# Keep the pointer hidden at startup and hide it again one second after the
+# trackpad stops moving.
+python3 "$HOME/.config/console-de/cursor_hide.py" >>"$HOME/.cache/console-de-cursor.log" 2>&1 &
+
+# PS5-style home shell (clock/volume/battery now live in its top bar —
+# waybar was removed so nothing overlays games)
+console-de-shell >>"$LOG" 2>&1 &
+
+# Steam is NOT pre-started: games are launched through gamescope, which
+# runs Steam itself (Deck UI) in an isolated compositor — the controller
+# belongs to the game, never to the DE.
+
+# wallpaper: saved choice, else solid console-black
+WP=""
+[ -f "$HOME/.config/console-de/wallpaper" ] && WP="$(cat "$HOME/.config/console-de/wallpaper")"
+if [ -n "$WP" ] && [ -f "$WP" ]; then
+  swaybg -i "$WP" -m fill >>"$LOG" 2>&1 &
+else
+  swaybg -c '#000000' >>"$LOG" 2>&1 &
+fi
+
+# gamepad input: the home shell reads /dev/input pads DIRECTLY (no
+# daemon needed). gamepad.py is NOT started here on purpose — two
+# processes fighting over the pad grab caused glitches. Run it by hand
+# only if you want pad->keyboard in other apps:
+#   python3 ~/.config/console-de/gamepad.py &
