@@ -38,6 +38,16 @@ The installer uses `sudo` for packages and system session files. Run it as your 
 
 After installation, log out. At GDM, choose **Console DE** from the session menu and sign in.
 
+## Uninstall
+
+Clone or download the repository, then run:
+
+```sh
+sh uninstall.sh
+```
+
+The script asks before removing the Console DE session, installed launchers, udev rule, and its configuration/assets. Steam and system packages are left installed because the installer does not record which packages were already present.
+
 ## Controls
 
 | Input | Action |
