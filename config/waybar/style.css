@@ -1,0 +1,59 @@
+/* Console DE — waybar */
+* {
+  font-family: "DejaVu Sans", sans-serif;
+  font-size: 13px;
+  font-weight: bold;
+  color: #d7e1f5;
+  background: transparent;
+  border: none;
+}
+
+window#waybar {
+  background: rgba(10, 14, 26, 0.82);
+  border: 1px solid #1a2035;
+  border-radius: 12px;
+}
+
+#custom-logo {
+  padding: 0 12px;
+  color: #4a9eff;
+  font-size: 15px;
+}
+
+#workspaces button {
+  padding: 0 10px;
+  color: #46507a;
+  border-radius: 8px;
+  margin: 4px 2px;
+}
+#workspaces button.active {
+  color: #ffffff;
+  background: #0070d1;
+}
+#workspaces button:hover {
+  color: #ffffff;
+  background: #12203c;
+}
+
+#window {
+  padding: 0 14px;
+  color: #7d87a3;
+}
+
+#clock {
+  padding: 0 16px;
+  color: #ffffff;
+  font-size: 14px;
+}
+
+#pulseaudio, #backlight, #network, #battery, #custom-power {
+  padding: 0 12px;
+  margin: 0 1px;
+}
+#pulseaudio:hover, #backlight:hover, #network:hover, #battery:hover, #custom-power:hover {
+  background: #12203c;
+  border-radius: 8px;
+}
+#battery.warning { color: #ffb020; }
+#battery.critical { color: #ff4757; }
+#custom-power { color: #ff4757; font-size: 15px; }
