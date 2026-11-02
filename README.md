@@ -1,4 +1,4 @@
-# PS5 Shell: PS5 Experience on Linux
+# PS5 Shell
 
 ![Linux](https://img.shields.io/badge/platform-Linux-4c9aff) ![Wayland](https://img.shields.io/badge/session-Wayland-7c4dff) ![Python](https://img.shields.io/badge/interface-Python%20%2B%20GTK3-3776ab)
 
@@ -27,8 +27,8 @@ PS5 Shell launches Steam games through the signed-in Steam client. It does not r
 See docs/INSTALLATION.md for prerequisites, supported package-manager families, and the GDM setup steps.
 
 ```sh
-git clone https://github.com/beastzy/ps5-shell-ps5-experience-on-linux.git
-cd ps5-shell-ps5-experience-on-linux
+git clone https://github.com/beastzy/PS5-Shell.git
+cd PS5-Shell
 sh install.sh
 ```
 
