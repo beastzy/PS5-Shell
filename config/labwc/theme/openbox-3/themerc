@@ -1,0 +1,25 @@
+/* Console DE — labwc window decoration theme (openbox-3 format) */
+window.active.border.color: #0070d1
+window.inactive.border.color: #1a2035
+border.width: 3
+padding.height: 4
+padding.width: 4
+titlebar.height: 30
+
+window.active.title.separator.color: #0070d1
+window.inactive.title.separator.color: #1a2035
+
+window.active.title.button.unpressed.image.color: #9fb4d8
+window.inactive.title.button.unpressed.image.color: #46507030
+window.active.title.button.pressed.image.color: #ffffff
+
+menu.border.width: 2
+menu.border.color: #0070d1
+menu.items.bg: #0d1322
+menu.items.text.color: #d7e1f5
+menu.items.active.bg: #0070d1
+menu.items.active.text.color: #ffffff
+menu.title.bg: #0d1322
+menu.title.text.color: #4a9eff
+menu.separator.width: 1
+menu.separator.color: #1a2035
