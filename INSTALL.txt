@@ -1,0 +1,12 @@
+PS5 Shell installation
+
+The installer is in this folder. Run it as your regular user:
+
+    sh install.sh
+
+It uses sudo for system packages and session setup. When it completes, log
+out and choose “Console DE” from the session menu at GDM. This is the installed
+session's technical name; the project is presented as PS5 Shell.
+
+See README.md and docs/INSTALLATION.md for full requirements, update notes,
+optional features, and troubleshooting.

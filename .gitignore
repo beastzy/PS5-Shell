@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local runtime output
+*.log
+console-de-doctor.txt
+screenshots/
+Videos/
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*.swo
+*~
