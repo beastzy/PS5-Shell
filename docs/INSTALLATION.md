@@ -44,6 +44,12 @@ Log out and back in to load the refreshed shell and session configuration.
 - **Region screenshots:** require both `grim` and `slurp`.
 - **Gamepad translation for other apps:** `config/console-de/gamepad.py` can translate a controller into keyboard events. It is not launched automatically because Console DE reads the controller directly; running both readers can compete for controller input.
 
-## Remove the session
+## Uninstall
 
-The project does not currently include an uninstaller. To remove it, first choose another GDM session, then remove the installed session entry and helper scripts, and remove the Console DE files under your home directory. Review each path before deleting it so personal settings and assets are not removed accidentally.
+Clone or download the repository and run the uninstaller as your regular user:
+
+```sh
+sh uninstall.sh
+```
+
+It asks for confirmation, then removes the Console DE session entry, installed launchers, udev rule, and Console DE configuration/assets. Steam and system packages remain installed because the installer does not track which packages were already present. Log out or restart the display manager after removal.
