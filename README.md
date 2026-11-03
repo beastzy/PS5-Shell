@@ -10,11 +10,14 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 
 > This is an experimental personal project inspired by console interfaces. It is not affiliated with or endorsed by Sony, PlayStation, Valve, or GNOME.
 
-## Video showcase
+## What's new (beta)
 
-[![PS5 Shell feature showcase — click to play](media/ps5-shell-feature-reel.jpg)](https://raw.githubusercontent.com/beastzy/PS5-Shell/main/media/ps5-shell-feature-reel.mp4)
-
-[Watch the feature reel](https://raw.githubusercontent.com/beastzy/PS5-Shell/main/media/ps5-shell-feature-reel.mp4). It highlights the startup animation, game library, settings, Steam launch and resume flow, and Control Center over a running game.
+- **Game Library tile** — new last tile in the Games carousel that opens your `~/Pictures/Screenshots` folder with the PS 30th Anniversary background
+- **PS 30th Anniversary background** — displayed behind the Game Library tile when selected
+- **Dynamic Game Library icon scaling** — 1.29x when not selected, 1.76x when selected; icons pre-scaled with HYPER interpolation for sharpness
+- **Launch cover animation** — game background art reveals from left to right with smooth ease-out when launching a game
+- **Control Center icon highlighting** — white circle surround with black-tinted icon when selected (same as topbar search/settings)
+- **Faster Guide/Home response** — reduced labwc keybind dispatch delay
 
 ## What it includes
 
@@ -35,7 +38,7 @@ The DE launches Steam games through the signed-in Steam client. It does not requ
 See [Installation](docs/INSTALLATION.md) for prerequisites, supported package-manager families, and the GDM steps.
 
 ```sh
-git clone https://github.com/beastzy/PS5-Shell.git
+git clone -b beta https://github.com/beastzy/PS5-Shell.git
 cd PS5-Shell
 sh install.sh
 ```
@@ -55,7 +58,7 @@ sh uninstall.sh
 Or run the uninstaller directly from GitHub:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/main/uninstall.sh -o /tmp/ps5-shell-uninstall.sh && sh /tmp/ps5-shell-uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/beta/uninstall.sh -o /tmp/ps5-shell-uninstall.sh && sh /tmp/ps5-shell-uninstall.sh
 ```
 
 The script asks before removing the Console DE session, installed launchers, udev rule, and its configuration/assets. Steam and system packages are left installed because the installer does not record which packages were already present.
@@ -97,7 +100,6 @@ config/       labwc, Waybar, Wofi, terminal, shell, controller code, and assets
 scripts/      session launcher, shell launcher, screenshots, diagnostics, helpers
 session/      GDM Wayland session entry
 docs/         installation, controls, troubleshooting, and development guides
-media/        video showcase and preview image
 install.sh    distro detection, dependency setup, and file installation
 ```
 
