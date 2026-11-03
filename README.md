@@ -12,10 +12,9 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 
 ## Demo
 
-<video width="100%" max-width="960" controls autoplay muted loop playsinline>
-  <source src="media/videos/ps5-shell-feature-reel.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+Watch the feature reel: [PS5 Shell Feature Reel](media/videos/ps5-shell-feature-reel.mp4)
+
+Click the link to play the video in-browser using GitHub's built-in player.
 
 ## What it includes
 
