@@ -502,17 +502,29 @@ class GameTile(Gtk.DrawingArea):
         if art:
             _log(f"Tile art found: {art}")
             try:
-                self.pb = _cover_pixbuf(art, self.tile_w, self.tile_h)
-                if self.pb:
-                    _log(f"Tile art pixbuf created: {self.pb.get_width()}x{self.pb.get_height()}")
+                if self.game.get('library'):
+                    # Store original unscaled pixbuf; scale dynamically at draw
+                    # time based on selection state.
+                    source = GdkPixbuf.Pixbuf.new_from_file(art)
+                    self.pb = source
                 else:
-                    _log("Tile art pixbuf is None")
+                    self.pb = _cover_pixbuf(art, self.tile_w, self.tile_h)
+                    if self.pb:
+                        _log(f"Tile art pixbuf created: {self.pb.get_width()}x{self.pb.get_height()}")
+                    else:
+                        _log("Tile art pixbuf is None")
             except Exception as e:
                 _log(f"Tile art load failed: {e}")
         else:
             _log(f"No tile art for {self.game.get('name')}")
 
     def _get_game_art(self):
+        if self.game.get('library'):
+            lib_icon = os.path.expanduser(
+                "~/.config/console-de/icons/game-library.png")
+            if os.path.isfile(lib_icon):
+                return lib_icon
+            return None
         if not self.game.get('steam'):
             return None
         appid = self.game.get('appid')
@@ -525,8 +537,11 @@ class GameTile(Gtk.DrawingArea):
         h = self.tile_h
         radius = _font_px(14)  # match CSS border-radius (decreased)
 
-        # Draw dark rounded background
-        cr.set_source_rgba(0.11, 0.13, 0.16, 1.0)
+        # Draw dark rounded background (slightly translucent for library tile)
+        if self.game.get('library'):
+            cr.set_source_rgba(0.11, 0.13, 0.16, 0.85)
+        else:
+            cr.set_source_rgba(0.11, 0.13, 0.16, 1.0)
         cr.new_sub_path()
         cr.arc(radius, radius, radius, math.pi, 3 * math.pi / 2)
         cr.arc(w - radius, radius, radius, 3 * math.pi / 2, 2 * math.pi)
@@ -544,10 +559,26 @@ class GameTile(Gtk.DrawingArea):
         cr.close_path()
         cr.clip()
 
-        # Draw art filling the tile
+        # Draw art filling the tile (Game Library icons scale dynamically;
+        # overflow is clipped by the rounded-rect mask)
         if self.pb:
+            cr.save()
+            if self.game.get('library'):
+                # 1.29x when not selected, 1.76x when selected
+                icon_scale = 1.29 if not self.selected else 1.76
+                cr.translate(w * 0.5, h * 0.5)
+                cr.scale((w / self.pb.get_width()) * icon_scale,
+                         (h / self.pb.get_height()) * icon_scale)
+                cr.translate(-self.pb.get_width() * 0.5,
+                             -self.pb.get_height() * 0.5)
+            else:
+                Gdk.cairo_set_source_pixbuf(cr, self.pb, 0, 0)
+                cr.paint()
+                cr.restore()
+                return
             Gdk.cairo_set_source_pixbuf(cr, self.pb, 0, 0)
             cr.paint()
+            cr.restore()
         else:
             # Fallback: game name text
             cr.set_source_rgba(1, 1, 1, 1)
@@ -753,7 +784,11 @@ class ShellWindow(Gtk.ApplicationWindow):
             Gtk.StateFlags.NORMAL, Gdk.RGBA(0.05, 0.07, 0.10, 1.0))
 
         self._m = float(_scale)
-        self._launch_black_screen = None
+        self._launch_cover = None
+        self._launch_cover_da = None
+        self._launch_cover_art_pb = None
+        self._launch_cover_clip_width = 0
+        self._launch_cover_anim_id = None
         self._launch_show_time = None
         self._launch_pre_procs = set()
         self._focus_out_time = None
@@ -798,6 +833,13 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._apply_css()
 
         self.games = list_steam_games()
+        # Add Game Library tile to the end of the carousel
+        self.games.append({
+            "name": "Game Library",
+            "appid": None,
+            "steam": False,
+            "library": True,
+        })
         self.apps = desktop_apps()
         self.tab = 0
         self.tab_focus_idx = 0
@@ -877,6 +919,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.control_center_selected = 10
         self.control_center_items = []
         self.control_center_icon_pixbufs = []
+        self._cc_icon_frames = []
         self.control_center_power_open = False
         self.control_center_power_choice_idx = 0
         self.control_center_power_buttons = []
@@ -1250,6 +1293,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.clock_label.set_name("clock-label")
         self.clock_label.set_halign(Gtk.Align.END)
         self.clock_label.set_valign(Gtk.Align.CENTER)
+        self.clock_label.set_can_focus(False)
         self.clock_label.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(1, 1, 1, 1))
         self.clock_label.show()
         hbox.pack_start(self.clock_label, False, False, self._sw_pct(3))
@@ -1385,8 +1429,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         dock.set_hexpand(False)
         dock.set_halign(Gtk.Align.CENTER)
         dock.set_valign(Gtk.Align.END)
-        dock.set_size_request(-1, self._sh_pct(8.4))
-        dock.set_margin_bottom(self._sh_pct(3.5))
+        dock.set_size_request(-1, self._sh_pct(10))
+        dock.set_margin_bottom(self._sh_pct(4.5))
         layer.add_overlay(dock)
 
         names = (
@@ -1400,18 +1444,36 @@ class ShellWindow(Gtk.ApplicationWindow):
         )
         icon_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "icons", "control_center")
-        cell_width = self._sw_pct(6.975)
-        icon_height = self._sh_pct(4.48)
+        cell_width = self._sw_pct(9.5)
+        icon_height = self._sh_pct(6.2)
         for index, (name, icon_name) in enumerate(zip(names, icon_names)):
             cell = Gtk.EventBox()
             cell.set_visible_window(False)
-            cell.set_size_request(cell_width, self._sh_pct(8.4))
+            cell.set_size_request(cell_width, self._sh_pct(10))
             cell.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
             cell.connect("button-press-event", self._on_control_center_item_press, index)
 
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             content.set_halign(Gtk.Align.CENTER)
             content.set_valign(Gtk.Align.CENTER)
+
+            # Profile and Power icons use the old opacity-only method
+            # (no white-circle + black-tint highlight)
+            use_new_highlight = icon_name not in ("profile", "power")
+
+            icon_frame = None
+            pixbuf_selected = None
+            if use_new_highlight:
+                # Icon frame for white-circle focus highlight (like topbar icons)
+                icon_frame = Gtk.EventBox()
+                icon_frame.set_name("cc-icon-frame")
+                frame_diameter = int(icon_height * 1.35)
+                icon_frame.set_size_request(frame_diameter, frame_diameter)
+                icon_frame.set_halign(Gtk.Align.CENTER)
+                icon_frame.set_valign(Gtk.Align.CENTER)
+                icon_frame.connect("draw", self._draw_orbit_widget)
+                self._cc_icon_frames.append(icon_frame)
+
             image = Gtk.Image()
             pixbuf = None
             icon_ext = "png" if icon_name == "profile" else "svg"
@@ -1431,15 +1493,24 @@ class ShellWindow(Gtk.ApplicationWindow):
                 _log(f"Control center icon unavailable ({name}): {exc}")
             image.set_halign(Gtk.Align.CENTER)
             image.set_valign(Gtk.Align.CENTER)
-            content.pack_start(image, False, False, 0)
+
+            if use_new_highlight:
+                icon_frame.add(image)
+                pixbuf_selected = self._make_icon_black(pixbuf) if pixbuf else None
+                content.pack_start(icon_frame, False, False, 0)
+            else:
+                content.pack_start(image, False, False, 0)
             cell.add(content)
             dock.pack_start(cell, False, False, 0)
             self.control_center_items.append({
                 "name": name, "widget": cell,
                 "image": image, "pixbuf": pixbuf,
+                "icon_frame": icon_frame,
+                "pixbuf_selected": pixbuf_selected,
+                "use_new_highlight": use_new_highlight,
             })
 
-        dock.set_size_request(cell_width * len(names), self._sh_pct(8.4))
+        dock.set_size_request(cell_width * len(names), self._sh_pct(10))
 
         # Power actions sit directly above the Power icon, like a small
         # control-center popover instead of a centered system dialog.
@@ -1512,7 +1583,18 @@ class ShellWindow(Gtk.ApplicationWindow):
         selected = max(0, min(self.control_center_selected,
                               len(self.control_center_items) - 1))
         for index, item in enumerate(self.control_center_items):
-            item["image"].set_opacity(1.0 if index == selected else 0.72)
+            is_selected = index == selected
+            if item.get("use_new_highlight"):
+                ctx = item["icon_frame"].get_style_context()
+                if is_selected:
+                    ctx.add_class("selected")
+                else:
+                    ctx.remove_class("selected")
+                item["image"].set_from_pixbuf(
+                    item["pixbuf_selected"] if is_selected else item["pixbuf"])
+            item["image"].set_opacity(1.0 if is_selected else 0.72)
+            if item.get("icon_frame"):
+                item["icon_frame"].queue_draw()
 
     def _move_control_center_selection(self, delta):
         self.control_center_selected = (
@@ -1524,8 +1606,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Open or close Control Center above the current foreground surface."""
         if not self._startup_hidden:
             return
-        if self._launch_black_screen is not None:
-            self._hide_launch_black_screen()
+        if self._launch_cover is not None:
+            self._hide_launch_cover()
         if self.control_center_open:
             self._close_control_center()
             return
@@ -1826,14 +1908,14 @@ class ShellWindow(Gtk.ApplicationWindow):
                 events={ecodes.EV_KEY: keys})
             keyboard.write(ecodes.EV_KEY, meta, 1)
             keyboard.syn()
-            time.sleep(0.03)
+            time.sleep(0.005)
             if shift:
                 keyboard.write(ecodes.EV_KEY, shift_key, 1)
                 keyboard.syn()
-                time.sleep(0.03)
+                time.sleep(0.005)
             keyboard.write(ecodes.EV_KEY, key_code, 1)
             keyboard.syn()
-            time.sleep(0.03)
+            time.sleep(0.005)
             keyboard.write(ecodes.EV_KEY, key_code, 0)
             keyboard.syn()
             if shift:
@@ -2526,6 +2608,33 @@ class ShellWindow(Gtk.ApplicationWindow):
                 src = y * rowstride + x * channels
                 dst = (y * width + x) * 4
                 tinted[dst:dst + 4] = bytes((0, 0, 0, source[src + channels - 1]))
+        return GdkPixbuf.Pixbuf.new_from_bytes(
+            GLib.Bytes.new(bytes(tinted)), GdkPixbuf.Colorspace.RGB, True, 8,
+            width, height, width * 4)
+
+    def _make_icon_black(self, pixbuf):
+        """Create a black version of an icon, generating alpha if missing (SVGs)."""
+        if pixbuf is None:
+            return None
+        if pixbuf.get_has_alpha():
+            return self._tint_pixbuf_black(pixbuf)
+        # SVG may load without alpha — build one from luminance so the icon
+        # shape shows through as black instead of a solid black square.
+        width, height = pixbuf.get_width(), pixbuf.get_height()
+        channels = pixbuf.get_n_channels()
+        rowstride = pixbuf.get_rowstride()
+        source = pixbuf.get_pixels()
+        tinted = bytearray(width * height * 4)
+        for y in range(height):
+            for x in range(width):
+                src = y * rowstride + x * channels
+                r = source[src]
+                g = source[src + 1]
+                b = source[src + 2]
+                lum = (r + g + b) / 3.0
+                alpha = min(255, int(lum * 1.2))
+                dst = (y * width + x) * 4
+                tinted[dst:dst + 4] = bytes((0, 0, 0, alpha))
         return GdkPixbuf.Pixbuf.new_from_bytes(
             GLib.Bytes.new(bytes(tinted)), GdkPixbuf.Colorspace.RGB, True, 8,
             width, height, width * 4)
@@ -3394,7 +3503,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         row.set_hexpand(True)
         row.set_size_request(-1, self._sh_pct(6))
         row.override_background_color(
-            Gtk.StateFlags.NORMAL, Gdk.RGBA(0.11, 0.13, 0.16, 1.0))
+            Gtk.StateFlags.NORMAL, Gdk.RGBA(0.11, 0.13, 0.16, 0.0))
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         box.set_margin_start(self._sw_pct(2))
@@ -3441,7 +3550,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             row['widget'].override_background_color(
                 Gtk.StateFlags.NORMAL,
                 Gdk.RGBA(0.20, 0.25, 0.35, 1.0) if on and not self.tab_bar_focused
-                else Gdk.RGBA(0.11, 0.13, 0.16, 1.0))
+                else Gdk.RGBA(0.11, 0.13, 0.16, 0.0))
             row['widget'].set_name("settings-item")
             row['widget'].get_style_context().remove_class("selected")
             if on and not self.tab_bar_focused:
@@ -3950,7 +4059,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         alloc = widget.get_allocation()
         inset = max(1.0, self._font_px(1) / 2.0)
         if widget in (getattr(self, "settings_icon_frame", None),
-                      getattr(self, "search_icon_frame", None)):
+                      getattr(self, "search_icon_frame", None)) or \
+           widget in getattr(self, "_cc_icon_frames", []):
             diameter = min(alloc.width, alloc.height) - 2 * inset
             radius = diameter / 2.0
             cx, cy = alloc.width / 2.0, alloc.height / 2.0
@@ -4126,16 +4236,26 @@ class ShellWindow(Gtk.ApplicationWindow):
         try:
             pb = None
             if self.tab == 0 and self.games:
-                art = _bg_art_for(self.games[self.gsel])
-                if art:
-                    _log(f"BG art found: {art}")
-                    pb = _cover_pixbuf(art, self._sw, self._sh)
-                    if pb:
-                        _log("BG art set on window")
-                    else:
-                        _log("BG art pixbuf failed")
+                g = self.games[self.gsel]
+                if g.get('library'):
+                    # Game Library: use PS Background image
+                    bg_path = os.path.expanduser(
+                        "~/.config/console-de/icons/ps-background.png")
+                    if os.path.isfile(bg_path):
+                        pb = _cover_pixbuf(bg_path, self._sw, self._sh)
+                        if pb:
+                            _log("PS Background set as DE background")
                 else:
-                    _log(f"No BG art found for appid={self.games[self.gsel].get('appid')}")
+                    art = _bg_art_for(g)
+                    if art:
+                        _log(f"BG art found: {art}")
+                        pb = _cover_pixbuf(art, self._sw, self._sh)
+                        if pb:
+                            _log("BG art set on window")
+                        else:
+                            _log("BG art pixbuf failed")
+                    else:
+                        _log(f"No BG art found for appid={g.get('appid')}")
             composed = self._compose_background(pb)
             if composed:
                 self.bg_image.set_from_pixbuf(composed)
@@ -4208,14 +4328,23 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _update_game_info(self):
         if self.games and 0 <= self.gsel < len(self.games):
             g = self.games[self.gsel]
-            source = "Steam" if g.get('steam') else "App"
-            self.game_subtitle.set_text(f"Ready to play  ·  {source}".title())
-            # Load title art (logo.png) above the Play button
-            title_art = _find_title_art(g.get('appid'))
-            if title_art:
-                self._set_title_art(title_art)
-            else:
+            if g.get('library'):
+                # Game Library tile: hide subtitle, title art, Play button, More button
+                self.game_subtitle.set_text("")
                 self.title_art.clear()
+                self.play_box.set_visible(False)
+                self.more_box.set_visible(False)
+            else:
+                source = "Steam" if g.get('steam') else "App"
+                self.game_subtitle.set_text(f"Ready to play  ·  {source}".title())
+                # Load title art (logo.png) above the Play button
+                title_art = _find_title_art(g.get('appid'))
+                if title_art:
+                    self._set_title_art(title_art)
+                else:
+                    self.title_art.clear()
+                self.play_box.set_visible(True)
+                self.more_box.set_visible(True)
         else:
             self.game_subtitle.set_text("")
             self.title_art.clear()
@@ -5010,9 +5139,9 @@ class ShellWindow(Gtk.ApplicationWindow):
                 _log(f"Post-resume controller probe: EV_KEY code={code}, "
                      f"value={value}; DE observes the ungrabbed device")
             if (value == 1 and self._game_session_active and
-                    self._launch_black_screen is not None):
+                    self._launch_cover is not None):
                 _log(f"In-game controller input observed (code={code}); removing launch cover")
-                self._hide_launch_black_screen()
+                self._hide_launch_cover()
             return
         dpad_names = (
             ("BTN_DPAD_UP", self._nav_up),
@@ -5468,10 +5597,21 @@ class ShellWindow(Gtk.ApplicationWindow):
             cr.clip()
 
             # Draw art scaled to the tile (moved to the tile's position first)
+            # Game Library icons are pre-scaled 1.6x at load time (sharp HYPER);
+            # draw centered 1:1 so overflow is clipped by the rounded-rect mask.
             if pb:
                 cr.save()
-                cr.translate(x, y)
-                cr.scale(w / pb.get_width(), h / pb.get_height())
+                if self.games[i].get('library'):
+                    # 1.29x when not selected, 1.76x when selected
+                    icon_scale = 1.29 if ring_a <= 0.5 else 1.76
+                    cr.translate(x + w * 0.5, y + h * 0.5)
+                    cr.scale((w / pb.get_width()) * icon_scale,
+                             (h / pb.get_height()) * icon_scale)
+                    cr.translate(-pb.get_width() * 0.5,
+                                 -pb.get_height() * 0.5)
+                else:
+                    cr.translate(x, y)
+                    cr.scale(w / pb.get_width(), h / pb.get_height())
                 Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
                 cr.paint()
                 cr.restore()
@@ -5515,6 +5655,18 @@ class ShellWindow(Gtk.ApplicationWindow):
         def load_art():
             loaded = {}
             for index, game in games:
+                if game.get("library"):
+                    lib_icon = os.path.expanduser(
+                        "~/.config/console-de/icons/game-library.png")
+                    if os.path.isfile(lib_icon):
+                        try:
+                            source = GdkPixbuf.Pixbuf.new_from_file(lib_icon)
+                            # Store original unscaled pixbuf; scale at draw time
+                            # based on selection state.
+                            loaded[index] = source
+                        except Exception:
+                            pass
+                    continue
                 if not game.get("steam"):
                     continue
                 art = _find_tile_art(game.get("appid"))
@@ -5523,7 +5675,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 try:
                     pixbuf = _cover_pixbuf(art, tile_size, tile_size)
                     if pixbuf is not None:
-                        loaded[game.get("appid")] = pixbuf
+                        loaded[index] = pixbuf
                 except Exception as exc:
                     _log(f"Carousel art decode failed for {game.get('appid')}: {exc}")
             GLib.idle_add(self._publish_carousel_pixbufs, generation, games, loaded)
@@ -5535,11 +5687,10 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _publish_carousel_pixbufs(self, generation, games, loaded):
         if generation != self._carousel_load_generation:
             return False
-        self._carousel_pixbufs = {
-            index: loaded[game.get("appid")]
-            for index, game in enumerate(self.games)
-            if game.get("appid") in loaded
-        }
+        self._carousel_pixbufs = {}
+        for index, game in games:
+            if index in loaded:
+                self._carousel_pixbufs[index] = loaded[index]
         if hasattr(self, "carousel"):
             self.carousel.queue_draw()
         _log(f"Carousel art loaded off-thread: {len(self._carousel_pixbufs)} tiles")
@@ -5798,6 +5949,13 @@ class ShellWindow(Gtk.ApplicationWindow):
                          for game in discovered}
             if old_games != new_games:
                 self.games = discovered
+                # Re-append Game Library tile (removed by Steam refresh)
+                self.games.append({
+                    "name": "Game Library",
+                    "appid": None,
+                    "steam": False,
+                    "library": True,
+                })
                 self._load_game_order()
                 if selected_appid is not None:
                     self.gsel = next((i for i, game in enumerate(self.games)
@@ -6127,6 +6285,14 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _play_selected(self):
         self._cancel_home_foreground_enforcement()
         g = self.games[self.gsel]
+        if g.get('library'):
+            _log("Launch: Game Library - opening screenshot folder")
+            subprocess.Popen(
+                ["xdg-open", os.path.expanduser("~/Pictures/Screenshots")],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            self._show_toast("Game Library")
+            return
         if self._is_background_resume_selection():
             appid = str(g.get("appid") or "")
             previous_appid = str(self._active_game_appid or "")
@@ -6209,7 +6375,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._active_game_appid = str(g.get('appid') or "")
         self._active_game_name = g.get("name", "")
         self._update_play_button_label()
-        self._show_launch_black_screen(g)
+        self._show_launch_cover(g)
         self._opened_application_sequence += 1
         game_record = {
             "id": self._opened_application_sequence,
@@ -6246,12 +6412,29 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._resume_background_audio()
         self._schedule_promote(appid=g.get('appid'))
 
-    def _show_launch_black_screen(self, game=None):
-        """Show a compositor-level black curtain while the game takes over."""
-        if self._launch_black_screen is not None:
+    def _show_launch_cover(self, game=None):
+        """Show a compositor-level cover revealing game art from the left."""
+        if self._launch_cover is not None:
             return
-        _log("BLACK SCREEN: shown")
+        _log("LAUNCH COVER: shown")
         self._pause_music()
+        self._launch_cover_clip_width = 0
+        self._launch_cover_anim_id = None
+        self._launch_cover_anim_start = time.monotonic()
+
+        # Load game background art
+        art_pb = None
+        if game:
+            art = _bg_art_for(game)
+            if art:
+                _log(f"LAUNCH COVER: art found for {game.get('name')}")
+                art_pb = _cover_pixbuf(art, self._sw, self._sh)
+                if art_pb:
+                    _log("LAUNCH COVER: art pixbuf created")
+                else:
+                    _log("LAUNCH COVER: art pixbuf failed")
+        self._launch_cover_art_pb = art_pb
+
         use_layer_shell = self._shell_layer_shell
         if use_layer_shell:
             cover = Gtk.ApplicationWindow(
@@ -6274,24 +6457,30 @@ class ShellWindow(Gtk.ApplicationWindow):
             for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM,
                          GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
                 GtkLayerShell.set_anchor(cover, edge, True)
-            black = Gtk.EventBox()
-            black.override_background_color(
-                Gtk.StateFlags.NORMAL, Gdk.RGBA(0.0, 0.0, 0.0, 1.0))
-            cover.add(black)
-            self._launch_black_screen = cover
+
+            da = Gtk.DrawingArea()
+            da.set_size_request(self._sw, self._sh)
+            da.connect("draw", self._draw_launch_cover)
+            cover.add(da)
+            self._launch_cover_da = da
+            self._launch_cover = cover
             cover.show_all()
-            _log("BLACK SCREEN: using Wayland overlay layer")
+            _log("LAUNCH COVER: using Wayland overlay layer")
         else:
             # X11 fallback: keep the cover in the shell window when the
             # layer-shell protocol is unavailable.
-            black = Gtk.EventBox()
-            black.set_hexpand(True)
-            black.set_vexpand(True)
-            black.override_background_color(
-                Gtk.StateFlags.NORMAL, Gdk.RGBA(0.0, 0.0, 0.0, 1.0))
-            self._overlay.add_overlay(black)
-            self._launch_black_screen = black
-            black.show_all()
+            da = Gtk.DrawingArea()
+            da.set_hexpand(True)
+            da.set_vexpand(True)
+            da.connect("draw", self._draw_launch_cover)
+            self._overlay.add_overlay(da)
+            self._launch_cover_da = da
+            self._launch_cover = da
+            da.show_all()
+
+        # Animate reveal from left
+        self._launch_cover_anim_id = GLib.timeout_add(16, self._animate_launch_cover)
+
         self._launch_show_time = time.monotonic()
         self._game_handoff_confirmed = False
         self._game_session_active = False
@@ -6308,12 +6497,93 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._game_check_timer_id = GLib.timeout_add(
                 200, self._check_game_launched)
 
-    def _hide_launch_black_screen(self):
-        _log("BLACK SCREEN: hidden")
+    def _draw_launch_cover(self, widget, cr):
+        """Draw launch cover art revealed from the left edge."""
+        if not HAVE_CAIRO:
+            return False
+        alloc = widget.get_allocation()
+        w, h = alloc.width, alloc.height
+        clip_w = getattr(self, "_launch_cover_clip_width", 0)
+        pb = getattr(self, "_launch_cover_art_pb", None)
+
+        if pb is None:
+            # No art available: draw black curtain
+            cr.set_source_rgba(0.0, 0.0, 0.0, 1.0)
+            cr.rectangle(0, 0, w, h)
+            cr.fill()
+            return False
+
+        # Draw the art clipped to the current reveal width (expands left->right)
+        cr.save()
+        cr.rectangle(0, 0, min(clip_w, w), h)
+        cr.clip()
+
+        # Scale art to cover the screen
+        pw, ph = pb.get_width(), pb.get_height()
+        if pw > 0 and ph > 0:
+            scale = max(w / pw, h / ph)
+            nw, nh = max(1, int(pw * scale)), max(1, int(ph * scale))
+            pb_scaled = pb.scale_simple(nw, nh, GdkPixbuf.InterpType.BILINEAR)
+            # Center the scaled art
+            x = max(0, (w - nw) // 2)
+            y = max(0, (h - nh) // 2)
+            Gdk.cairo_set_source_pixbuf(cr, pb_scaled, x, y)
+            cr.paint()
+
+        cr.restore()
+        return False
+
+    def _animate_launch_cover(self):
+        """Animate the launch cover reveal from left to right with ease-out."""
+        da = getattr(self, "_launch_cover_da", None)
+        if da is None:
+            return False
+
+        start = getattr(self, "_launch_cover_anim_start", None)
+        if start is None:
+            return False
+
+        alloc = da.get_allocation()
+        w = alloc.width
+        if w <= 0:
+            return True
+
+        # Time-based ease-out: fast start, smooth deceleration (300ms total)
+        elapsed = time.monotonic() - start
+        duration = 0.30
+        t = min(1.0, elapsed / duration)
+        # Cubic ease-out: 1 - (1 - t)^3
+        progress = 1.0 - (1.0 - t) ** 3
+
+        clip_w = int(w * progress)
+        self._launch_cover_clip_width = clip_w
+
+        da.queue_draw()
+
+        if t >= 1.0:
+            self._launch_cover_anim_id = None
+            return False
+        return True
+
+    def _hide_launch_cover(self):
+        _log("LAUNCH COVER: hidden")
         self._launch_show_time = None
-        if self._launch_black_screen is not None:
-            cover = self._launch_black_screen
-            self._launch_black_screen = None
+        self._launch_cover_anim_start = None
+        # Stop any in-progress animation
+        anim_id = getattr(self, "_launch_cover_anim_id", None)
+        if anim_id is not None:
+            try:
+                GLib.source_remove(anim_id)
+            except Exception:
+                pass
+            self._launch_cover_anim_id = None
+
+        if self._launch_cover is not None:
+            cover = self._launch_cover
+            self._launch_cover = None
+            self._launch_cover_da = None
+            self._launch_cover_art_pb = None
+            self._launch_cover_clip_width = 0
             try:
                 if cover.get_parent() is self._overlay:
                     self._overlay.remove(cover)
@@ -6324,16 +6594,16 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _place_launch_cover_below_game(self):
         """Keep the launch curtain visible but let the fullscreen game cover it."""
-        cover = self._launch_black_screen
+        cover = self._launch_cover
         if cover is None or not self._shell_layer_shell:
             return
         try:
             GtkLayerShell.set_layer(cover, GtkLayerShell.Layer.BOTTOM)
             GtkLayerShell.set_keyboard_mode(
                 cover, GtkLayerShell.KeyboardMode.NONE)
-            _log("BLACK SCREEN: moved below game layer")
+            _log("LAUNCH COVER: moved below game layer")
         except Exception as exc:
-            _log(f"BLACK SCREEN: could not lower behind game: {exc}")
+            _log(f"LAUNCH COVER: could not lower behind game: {exc}")
 
     def _get_running_procs(self):
         """Return dict of {pid: cmdline} for all running processes."""
@@ -6425,7 +6695,7 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _check_game_launched(self):
         """Track game startup and exit; remove the cover at confirmed handoff."""
-        if (self._launch_black_screen is None and
+        if (self._launch_cover is None and
                 not self._game_session_active and
                 self._launch_game_seen_at is None):
             self._game_check_timer_id = None
@@ -6703,7 +6973,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         finished_appid = str(self._active_game_appid or "")
         # The launch cover is a separate Wayland surface and must be destroyed
         # explicitly when returning to the DE.
-        self._hide_launch_black_screen()
+        self._hide_launch_cover()
         self._resume_background_audio()
         if self._background_audio_resume_timer is not None:
             try:
@@ -6888,9 +7158,9 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except Exception:
                     pass
                 self._focus_restore_timer = None
-            # Keep the black launch cover in place through the handoff. Once
+            # Keep the launch cover in place through the handoff. Once
             # the game is visible, lower the DE without presenting it again.
-            if (self._launch_black_screen is None and
+            if (self._launch_cover is None and
                     self._is_launched_game_running()):
                 self._set_shell_layer("bottom")
                 self.set_keep_above(False)
