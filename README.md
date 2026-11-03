@@ -10,12 +10,6 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 
 > This is an experimental personal project inspired by console interfaces. It is not affiliated with or endorsed by Sony, PlayStation, Valve, or GNOME.
 
-## Video showcase
-
-[![PS5 Shell feature showcase — click to play](media/ps5-shell-feature-reel.jpg)](https://raw.githubusercontent.com/beastzy/PS5-Shell/main/media/ps5-shell-feature-reel.mp4)
-
-[Watch the feature reel](https://raw.githubusercontent.com/beastzy/PS5-Shell/main/media/ps5-shell-feature-reel.mp4). It highlights the startup animation, game library, settings, Steam launch and resume flow, and Control Center over a running game.
-
 ## What it includes
 
 - A GTK 3 home shell that discovers local Steam games and installed `.desktop` applications.
