@@ -13,3 +13,5 @@ Videos/
 *.swp
 *.swo
 *~
+*.pcm
+media/videos/

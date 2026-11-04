@@ -10,6 +10,7 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 
 > This is an experimental personal project inspired by console interfaces. It is not affiliated with or endorsed by Sony, PlayStation, Valve, or GNOME.
 
+<<<<<<< HEAD
 ## What's new (beta)
 
 - **Game Library tile** — new last tile in the Games carousel that opens your `~/Pictures/Screenshots` folder with the PS 30th Anniversary background
@@ -19,6 +20,8 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 - **Control Center icon highlighting** — white circle surround with black-tinted icon when selected (same as topbar search/settings)
 - **Faster Guide/Home response** — reduced labwc keybind dispatch delay
 
+=======
+>>>>>>> 73e6e57d28647dc1f1ca05ac832b83db8d862dab
 ## What it includes
 
 - A GTK 3 home shell that discovers local Steam games and installed `.desktop` applications.
