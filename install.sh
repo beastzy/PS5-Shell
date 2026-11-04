@@ -216,7 +216,7 @@ BUILD_COMMIT=""
 if git -C "$SRC" rev-parse --verify HEAD >/dev/null 2>&1; then
   BUILD_COMMIT="$(git -C "$SRC" rev-parse --verify HEAD 2>/dev/null)"
 else
-  BUILD_COMMIT="$(python3 -c 'import json, urllib.request; r=urllib.request.Request("https://api.github.com/repos/beastzy/PS5-Shell/commits/beta", headers={"User-Agent":"PS5-Shell-installer"}); print(json.load(urllib.request.urlopen(r, timeout=6))["sha"])' 2>/dev/null || true)"
+  BUILD_COMMIT="$(python3 -c 'import json, urllib.request; r=urllib.request.Request("https://api.github.com/repos/beastzy/PS5-Shell/commits/main", headers={"User-Agent":"PS5-Shell-installer"}); print(json.load(urllib.request.urlopen(r, timeout=6))["sha"])' 2>/dev/null || true)"
 fi
 case "$BUILD_COMMIT" in
   *[!0-9a-fA-F]*|"")
