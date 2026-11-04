@@ -10,18 +10,6 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 
 > This is an experimental personal project inspired by console interfaces. It is not affiliated with or endorsed by Sony, PlayStation, Valve, or GNOME.
 
-<<<<<<< HEAD
-## What's new (beta)
-
-- **Game Library tile** — new last tile in the Games carousel that opens your `~/Pictures/Screenshots` folder with the PS 30th Anniversary background
-- **PS 30th Anniversary background** — displayed behind the Game Library tile when selected
-- **Dynamic Game Library icon scaling** — 1.29x when not selected, 1.76x when selected; icons pre-scaled with HYPER interpolation for sharpness
-- **Launch cover animation** — game background art reveals from left to right with smooth ease-out when launching a game
-- **Control Center icon highlighting** — white circle surround with black-tinted icon when selected (same as topbar search/settings)
-- **Faster Guide/Home response** — reduced labwc keybind dispatch delay
-
-=======
->>>>>>> 73e6e57d28647dc1f1ca05ac832b83db8d862dab
 ## What it includes
 
 - A GTK 3 home shell that discovers local Steam games and installed `.desktop` applications.
@@ -41,7 +29,7 @@ The DE launches Steam games through the signed-in Steam client. It does not requ
 See [Installation](docs/INSTALLATION.md) for prerequisites, supported package-manager families, and the GDM steps.
 
 ```sh
-git clone -b beta https://github.com/beastzy/PS5-Shell.git
+git clone https://github.com/beastzy/PS5-Shell.git
 cd PS5-Shell
 sh install.sh
 ```
@@ -61,7 +49,7 @@ sh uninstall.sh
 Or run the uninstaller directly from GitHub:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/beta/uninstall.sh -o /tmp/ps5-shell-uninstall.sh && sh /tmp/ps5-shell-uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/beastzy/PS5-Shell/main/uninstall.sh -o /tmp/ps5-shell-uninstall.sh && sh /tmp/ps5-shell-uninstall.sh
 ```
 
 The script asks before removing the Console DE session, installed launchers, udev rule, and its configuration/assets. Steam and system packages are left installed because the installer does not record which packages were already present.
