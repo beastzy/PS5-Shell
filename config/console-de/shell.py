@@ -149,9 +149,16 @@ def _paint_settings_gradient(cr, w, h):
         return
     key = (int(w), int(h))
     if key not in _SETTINGS_GRADIENT_CACHE:
+        _name = "settings_startup_gradient.png"
         image_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "settings_startup_gradient.png")
+            os.path.dirname(os.path.abspath(__file__)), _name)
+        if not os.path.isfile(image_path):
+            for _dir in (os.path.expanduser("~/.config/console-de"),
+                         os.getcwd()):
+                _alt = os.path.join(_dir, _name)
+                if os.path.isfile(_alt):
+                    image_path = _alt
+                    break
         try:
             image = GdkPixbuf.Pixbuf.new_from_file(image_path)
             if image.get_width() != w or image.get_height() != h:
@@ -480,14 +487,18 @@ def _cover_pixbuf(path, sw, sh):
 class GameTile(Gtk.DrawingArea):
     """Single PS5-style game tile: art clipped to a rounded squircle."""
 
-    def __init__(self, game, tile_w, tile_h, selected=False):
+    def __init__(self, game, tile_w, tile_h, selected=False, shell=None,
+                 ring=True, pad=0):
         super().__init__()
-        self.set_size_request(tile_w, tile_h)
+        self.ring = ring
+        self.pad = pad
+        self.set_size_request(tile_w + 2 * pad, tile_h + 2 * pad)
         self.game = game
         self.selected = selected
         self.tile_w = tile_w
         self.tile_h = tile_h
         self.pb = None
+        self.shell = shell
         self.connect("draw", self._on_draw)
         self._load_art()
 
@@ -533,6 +544,16 @@ class GameTile(Gtk.DrawingArea):
         return _find_tile_art(appid)
 
     def _on_draw(self, widget, cr):
+        # Isolate the art's clip/translate so the orbit border (drawn by a
+        # later draw handler on the same context) isn't clipped or shifted.
+        cr.save()
+        try:
+            cr.translate(self.pad, self.pad)
+            return self._draw_tile(widget, cr)
+        finally:
+            cr.restore()
+
+    def _draw_tile(self, widget, cr):
         w = self.tile_w
         h = self.tile_h
         radius = _font_px(14)  # match CSS border-radius (decreased)
@@ -590,8 +611,9 @@ class GameTile(Gtk.DrawingArea):
             cr.move_to((w - w_txt) / 2 - xb, (h - h_txt) / 2 - yb)
             cr.show_text(text)
 
-        # White ring border when selected
-        if self.selected:
+        # White ring border when selected (skipped where the shell paints
+        # the animated orbit border instead, e.g. the All Games grid)
+        if self.selected and self.ring:
             cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
             cr.set_line_width(_font_px(3))
             cr.new_sub_path()
@@ -734,6 +756,7 @@ def desktop_apps():
 
 class ShellWindow(Gtk.ApplicationWindow):
     TABS = ["Games", "Apps"]
+    CAROUSEL_GAME_LIMIT = 7  # game tiles; Game Library is always the 8th, last
 
     def __init__(self, app):
         super().__init__(application=app, title="Console DE")
@@ -834,6 +857,8 @@ class ShellWindow(Gtk.ApplicationWindow):
 
         self.games = list_steam_games()
         # Add Game Library tile to the end of the carousel
+        self.all_games = list_steam_games()
+        self.all_games_sel = 0
         self.games.append({
             "name": "Game Library",
             "appid": None,
@@ -855,6 +880,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         # Steam client management (kept warm for fast game launches)
         # Remember game order across restarts (promoted games stay at front)
         self._load_game_order()
+        self.games = self._trim_games_list(self.games)
         self.settings_sel = 0
         self._update_check_status = "Press A to check"
         self._update_check_running = False
@@ -2646,6 +2672,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.stack.add_named(self._create_games_page(), "games")
         self.stack.add_named(self._create_apps_page(), "apps")
         self.stack.add_named(self._create_settings_page(), "settings")
+        self.stack.add_named(self._create_all_games_page(), "all_games")
         parent.pack_start(self.stack, True, True, 0)
 
     def _create_games_page(self):
@@ -2791,6 +2818,215 @@ class ShellWindow(Gtk.ApplicationWindow):
         scrolled.add(grid)
         page.pack_start(scrolled, True, True, 0)
         return page
+
+    def _create_all_games_page(self):
+        """Hidden page (no top-bar tab) listing every installed game in a grid.
+
+        Reached only through the Game Library tile on the Games carousel.
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        page.set_hexpand(True)
+        page.set_vexpand(True)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_hexpand(True)
+        scrolled.set_vexpand(True)
+
+        grid = Gtk.Grid()
+        grid.set_column_spacing(self._sw_pct(2.0))
+        grid.set_row_spacing(self._sh_pct(2.4))
+        grid.set_column_homogeneous(True)
+        grid.set_row_homogeneous(False)
+        grid.set_margin_start(self._sw_pct(6))
+        grid.set_margin_top(self._sh_pct(4))
+        grid.set_margin_end(self._sw_pct(6))
+        grid.set_margin_bottom(self._sh_pct(5))
+        self.all_games_scrolled = scrolled
+        self.all_games_grid = grid
+
+        usable_width = self._sw * 0.88
+        target_tile_width = self._sw * 0.15
+        cols = max(3, min(6, int(usable_width / target_tile_width)))
+        gaps = self._sw_pct(2.0) * (cols - 1)
+        self._all_games_cols = cols
+        # Padding around each tile's art so the orbit border sits just outside
+        # it, like on the carousel, instead of being clipped to the tile.
+        self._all_games_tile_pad = self._car_ring_off + self._font_px(3)
+        self._all_games_tile_w = max(
+            self._sw_pct(12),
+            int((usable_width - gaps) / cols) - 2 * self._all_games_tile_pad)
+        self.all_games = []
+        self.all_games_sel = 0
+        self.all_game_tiles = []
+        self._populate_all_games_grid(list_steam_games())
+
+        scrolled.add(grid)
+        page.pack_start(scrolled, True, True, 0)
+        return page
+
+    def _populate_all_games_grid(self, games):
+        """(Re)build the All Games grid from a fresh list of installed games."""
+        grid = self.all_games_grid
+        for child in grid.get_children():
+            grid.remove(child)
+        games = sorted(games, key=lambda g: g["name"].casefold())
+        self.all_games = games
+        self.all_game_tiles = []
+        cols = self._all_games_cols
+        tile_w = self._all_games_tile_w
+
+        if not games:
+            lbl = Gtk.Label(label="No games found")
+            lbl.set_margin_top(self._sh_pct(10))
+            lbl.set_halign(Gtk.Align.CENTER)
+            lbl.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(1, 1, 1, 1))
+            grid.attach(lbl, 0, 0, cols, 1)
+            lbl.show()
+            return
+
+        label = Gtk.Label(label=f"All Games ({len(games)})")
+        label.set_margin_top(self._sh_pct(2))
+        label.set_halign(Gtk.Align.CENTER)
+        label.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(1, 1, 1, 1))
+        grid.attach(label, 0, 0, cols, 1)
+        label.show()
+
+        for i, game in enumerate(games):
+            tile = GameTile(game, tile_w, tile_w, selected=False,
+                            shell=self, ring=False,
+                            pad=self._all_games_tile_pad)
+            tile.set_halign(Gtk.Align.CENTER)
+            tile.set_valign(Gtk.Align.START)
+            tile.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+            tile.connect("button-press-event", self._on_all_game_tile_press, i)
+            tile.connect_after("draw", self._draw_all_game_tile_orbit)
+            grid.attach(tile, i % cols, 1 + i // cols, 1, 1)
+            tile.show()
+            self.all_game_tiles.append(tile)
+
+    def _open_all_games(self):
+        """Open the hidden All Games page from the Game Library tile."""
+        self.play_btn_focused = False
+        self.more_btn_focused = False
+        self._set_play_button_highlight(False)
+        self._set_more_button_highlight(False)
+        self.all_games_sel = 0
+        self._populate_all_games_grid(list_steam_games())
+        self._set_tab(3)
+        self.all_games_scrolled.get_vadjustment().set_value(0)
+        self._refresh_all_games_selection()
+
+    def _draw_all_game_tile_orbit(self, widget, cr):
+        """Same animated orbit border as the carousel, hugging the art edge."""
+        if not HAVE_CAIRO or not getattr(widget, "selected", False):
+            return False
+        off = self._car_ring_off
+        pad = widget.pad
+        self._paint_orbit_border(
+            cr, pad - off, pad - off,
+            widget.tile_w + 2 * off, widget.tile_h + 2 * off,
+            self._font_px(14),
+            max(self._car_ring_w, self._font_px(1)) * 1.6)
+        return False
+
+    def _on_all_game_tile_press(self, widget, event, index):
+        """Launch a game from the All Games grid and promote to carousel."""
+        if event.button != 1:
+            return False
+        if index >= len(self.all_games):
+            return False
+        game = self.all_games[index]
+        self.all_games_sel = index
+        self._refresh_all_games_selection()
+        self._play_sfx("PS5_Select")
+        self._launch_all_games_game(game)
+        return True
+
+    def _launch_all_games_game(self, game):
+        """Launch a game from the All Games page and promote it to the
+        front of the carousel."""
+        appid = str(game.get('appid') or "")
+        _log(f"Launch from All Games: {game['name']} (appid={appid})")
+
+        # Promote to front of carousel
+        if appid and self.games:
+            before = [g.get('appid') for g in self.games]
+            if any(g.get('appid') == appid for g in self.games):
+                self._move_to_front(self.games, 'appid', appid)
+            else:
+                self.games.insert(0, dict(game))
+            self.games = self._trim_games_list(self.games)
+            if [g.get('appid') for g in self.games] != before:
+                self.gsel = 0
+                self._refresh_selection()
+                self._save_game_order()
+                self._load_carousel_pixbufs()
+
+        # Launch the game
+        self._ensure_open_application_slot()
+        self._user_requested_de_foreground = False
+        self._active_game_appid = appid
+        self._active_game_name = game.get("name", "")
+        self._update_play_button_label()
+        self._show_launch_cover(game)
+        self._opened_application_sequence += 1
+        game_record = {
+            "id": self._opened_application_sequence,
+            "kind": "game", "name": self._active_game_name,
+            "appid": appid,
+            "opened_at": time.monotonic(),
+            "pre_pids": set(self._launch_pre_procs),
+            "pids": set(), "ever_seen": False,
+            "last_seen": time.monotonic(),
+        }
+        self._opened_applications.append(game_record)
+        self._set_shell_layer("bottom")
+        self.set_keep_above(False)
+        self._ungrab_gamepad()
+        steam_pid = self._find_steam_pid()
+        if steam_pid is not None:
+            self._wake_steam_process(steam_pid)
+        try:
+            subprocess.Popen(
+                ["steam", "-silent", "-applaunch", appid],
+                env=_gpu_offload_env(), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            _log(f"Launch command sent: {appid}")
+        except Exception as e:
+            _log(f"Launch failed: {e}")
+        self._resume_background_audio()
+        self._schedule_promote(appid=appid)
+
+    def _refresh_all_games_selection(self):
+        """Move the orbit selection border to the selected All Games tile."""
+        for i, tile in enumerate(self.all_game_tiles):
+            tile.selected = (i == self.all_games_sel and
+                             not self.tab_bar_focused)
+            tile.queue_draw()
+        self._scroll_all_games_to_selection()
+
+    def _scroll_all_games_to_selection(self):
+        if not self.all_game_tiles or self.all_games_sel >= len(self.all_game_tiles):
+            return
+        adj = self.all_games_scrolled.get_vadjustment()
+        if self.all_games_sel < self._all_games_cols:
+            adj.set_value(0)  # first row: show the header too
+            return
+        tile = self.all_game_tiles[self.all_games_sel]
+        grid = self.all_games_grid
+        pos = tile.translate_coordinates(grid, 0, 0)
+        if pos is None:
+            return
+        top = pos[1] + grid.get_margin_top()
+        bottom = top + tile.get_allocated_height()
+        pad = self._sh_pct(3)
+        view_top = adj.get_value()
+        view_h = adj.get_page_size()
+        if top - pad < view_top:
+            adj.set_value(max(0, top - pad))
+        elif bottom + pad > view_top + view_h:
+            adj.set_value(bottom + pad - view_h)
 
     def _start_app_tile_build(self):
         if (self._app_page_build_source is None and
@@ -3927,11 +4163,11 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.destroy()
 
     def _set_tab(self, idx):
-        if idx not in (0, 1, 2):
+        if idx not in (0, 1, 2, 3):
             return
         previous_tab = self.tab
-        page_name = ("games", "apps", "settings")[idx]
-        page_label = ("Games", "Apps", "Settings")[idx]
+        page_name = ("games", "apps", "settings", "all_games")[idx]
+        page_label = ("Games", "Apps", "Settings", "All Games")[idx]
         _log(f"Page: {page_label}")
         self.tab = idx
         if idx == 1:
@@ -3967,6 +4203,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         elif idx == 2:
             self._refresh_settings_highlight()
             self._sync_settings_stats_timer()
+        elif idx == 3:
+            self._refresh_all_games_selection()
         self._sync_background()
         _log(f"Page: {page_label}")
 
@@ -4000,7 +4238,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             frame.queue_draw()
 
     def _enter_tab_bar(self):
-        self.tab_focus_idx = (len(self.TABS) + 1 if self.tab == 2 else self.tab)
+        self.tab_focus_idx = (len(self.TABS) + 1 if self.tab == 2
+                              else 0 if self.tab == 3 else self.tab)
         self.tab_bar_focused = True
         self._update_tab_focus_frame()
         if hasattr(self, "carousel"):
@@ -4009,6 +4248,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._refresh_app_selection()
         elif self.tab == 2:
             self._refresh_settings_highlight()
+        elif self.tab == 3:
+            self._refresh_all_games_selection()
         self._play_sfx("PS5_Change")
         focused_label = (self.TABS[self.tab_focus_idx]
                          if self.tab_focus_idx < len(self.TABS)
@@ -4033,6 +4274,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._refresh_app_selection()
         elif self.tab == 2:
             self._refresh_settings_highlight()
+        elif self.tab == 3:
+            self._refresh_all_games_selection()
         self._play_sfx("PS5_Change")
 
     def _move_tab_focus(self, direction):
@@ -4194,6 +4437,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.carousel.queue_draw()
         elif self.tab == 1 and self.asel < len(self.app_tiles):
             self.app_tiles[self.asel].queue_draw()
+        elif self.tab == 3 and self.all_games_sel < len(self.all_game_tiles):
+            self.all_game_tiles[self.all_games_sel].queue_draw()
         elif self.tab == 2:
             if self.settings_pane == 0 and self.settings_cat < len(self.cat_rows):
                 self.cat_rows[self.settings_cat].queue_draw()
@@ -4235,7 +4480,15 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Show selected game's key art on Games tab; dark gradient elsewhere."""
         try:
             pb = None
-            if self.tab == 0 and self.games:
+            if self.tab == 3:
+                # All Games page shares the Game Library tile's background
+                bg_path = os.path.expanduser(
+                    "~/.config/console-de/icons/ps-background.png")
+                if os.path.isfile(bg_path):
+                    pb = _cover_pixbuf(bg_path, self._sw, self._sh)
+                    if pb:
+                        _log("PS Background set as All Games background")
+            elif self.tab == 0 and self.games:
                 g = self.games[self.gsel]
                 if g.get('library'):
                     # Game Library: use PS Background image
@@ -4426,6 +4679,14 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self.asel = max(self.asel - self._app_cols, 0)
                 self._refresh_app_selection()
                 self._play_sfx("PS5_Change")
+        elif self.tab == 3:
+            if (not self.all_game_tiles or
+                    self.all_games_sel < self._all_games_cols):
+                self._enter_tab_bar()
+            else:
+                self.all_games_sel -= self._all_games_cols
+                self._refresh_all_games_selection()
+                self._play_sfx("PS5_Change")
         elif self.tab == 2:
             if self.settings_pane == 1:
                 if self.settings_opt > 0:
@@ -4453,7 +4714,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._leave_tab_bar(commit=False)
             return
         elif self.tab == 0 and self.games:
-            if not self.play_btn_focused:
+            if (not self.play_btn_focused and
+                    not self.games[self.gsel].get('library')):
                 self.play_btn_focused = True
                 self._set_play_button_highlight(True)
                 self.carousel.queue_draw()
@@ -4463,6 +4725,13 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.asel = min(self.asel + self._app_cols, len(self.apps) - 1)
             self._refresh_app_selection()
             self._play_sfx("PS5_Change")
+        elif self.tab == 3 and self.all_game_tiles:
+            target = min(self.all_games_sel + self._all_games_cols,
+                         len(self.all_game_tiles) - 1)
+            if target != self.all_games_sel:
+                self.all_games_sel = target
+                self._refresh_all_games_selection()
+                self._play_sfx("PS5_Change")
         elif self.tab == 2:
             if self.settings_pane == 1:
                 if self.settings_opt < len(self.settings_rows) - 1:
@@ -4513,6 +4782,11 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.asel = max(self.asel - 1, 0)
             self._refresh_app_selection()
             self._play_sfx("PS5_Change")
+        elif self.tab == 3 and self.all_game_tiles:
+            if self.all_games_sel > 0:
+                self.all_games_sel -= 1
+                self._refresh_all_games_selection()
+                self._play_sfx("PS5_Change")
         elif self.tab == 2:
             if self.settings_pane == 1:
                 # Cycle current option value backward (Left)
@@ -4564,6 +4838,11 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.asel = min(self.asel + 1, len(self.apps) - 1)
             self._refresh_app_selection()
             self._play_sfx("PS5_Change")
+        elif self.tab == 3 and self.all_game_tiles:
+            if self.all_games_sel < len(self.all_game_tiles) - 1:
+                self.all_games_sel += 1
+                self._refresh_all_games_selection()
+                self._play_sfx("PS5_Change")
         elif self.tab == 2:
             if self.settings_pane == 1:
                 # Cycle current option value forward (Right)
@@ -4603,6 +4882,9 @@ class ShellWindow(Gtk.ApplicationWindow):
         elif self.tab == 1 and self.apps:
             self._play_sfx("PS5_Select")
             self._launch_app()
+        elif self.tab == 3 and self.all_game_tiles:
+            self._play_sfx("PS5_Select")
+            self._launch_all_games_game(self.all_games[self.all_games_sel])
         elif self.tab == 2:
             if self.settings_pane == 0:
                 self.settings_pane = 1
@@ -4688,6 +4970,9 @@ class ShellWindow(Gtk.ApplicationWindow):
             return True
         if self.tab_bar_focused:
             self._leave_tab_bar(commit=False)
+            return
+        if self.tab == 3:
+            self._set_tab(0)
             return
         if self.tab == 2:
             if self.settings_pane == 1:
@@ -5870,6 +6155,17 @@ class ShellWindow(Gtk.ApplicationWindow):
         return False
 
 
+    def _trim_games_list(self, games):
+        """Cap the carousel at CAROUSEL_GAME_LIMIT games followed by the
+        Game Library tile, which always stays last. Games are ordered most
+        recently opened first, so the oldest-opened ones fall off the end."""
+        library = next((g for g in games if g.get("library")), None) or {
+            "name": "Game Library", "appid": None,
+            "steam": False, "library": True,
+        }
+        items = [g for g in games if not g.get("library")]
+        return items[:self.CAROUSEL_GAME_LIMIT] + [library]
+
     def _move_to_front(self, items, key, value):
         """Move the item whose items[i][key]==value to index 0 of items."""
         for i, item in enumerate(items):
@@ -5943,26 +6239,25 @@ class ShellWindow(Gtk.ApplicationWindow):
             selected_appid = (self.games[self.gsel].get("appid")
                               if self.games and 0 <= self.gsel < len(self.games)
                               else None)
-            old_games = {game.get("appid"): game.get("name")
-                         for game in self.games}
-            new_games = {game.get("appid"): game.get("name")
-                         for game in discovered}
-            if old_games != new_games:
-                self.games = discovered
-                # Re-append Game Library tile (removed by Steam refresh)
-                self.games.append({
-                    "name": "Game Library",
-                    "appid": None,
-                    "steam": False,
-                    "library": True,
-                })
-                self._load_game_order()
+            library = next((g for g in self.games if g.get("library")), None)
+            installed = {g["appid"]: g for g in discovered}
+            kept = [installed[g["appid"]] for g in self.games
+                    if not g.get("library") and g.get("appid") in installed]
+            kept_ids = {g["appid"] for g in kept}
+            extra = [g for g in discovered if g["appid"] not in kept_ids]
+            new_list = self._trim_games_list(
+                kept + extra + ([library] if library else []))
+            old_sig = [(g.get("appid"), g.get("name")) for g in self.games]
+            new_sig = [(g.get("appid"), g.get("name")) for g in new_list]
+            if old_sig != new_sig:
+                self.games = new_list
                 if selected_appid is not None:
                     self.gsel = next((i for i, game in enumerate(self.games)
                                       if game.get("appid") == selected_appid),
                                      min(self.gsel, max(0, len(self.games) - 1)))
                 elif self.games:
-                    self.gsel = min(self.gsel, len(self.games) - 1)
+                    # Library tile was selected: it is always the last tile
+                    self.gsel = len(self.games) - 1
                 else:
                     self.gsel = 0
                 self._load_carousel_pixbufs()
@@ -6022,6 +6317,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._refresh_selection()
             self._refresh_app_selection()
             self._save_game_order()
+            self._load_carousel_pixbufs()
             _log("Promoted recently launched item to front")
         self._promote_appid = None
         self._promote_name = None
@@ -6286,12 +6582,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._cancel_home_foreground_enforcement()
         g = self.games[self.gsel]
         if g.get('library'):
-            _log("Launch: Game Library - opening screenshot folder")
-            subprocess.Popen(
-                ["xdg-open", os.path.expanduser("~/Pictures/Screenshots")],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
-            self._show_toast("Game Library")
+            _log("Launch: Game Library - opening All Games")
+            self._open_all_games()
             return
         if self._is_background_resume_selection():
             appid = str(g.get("appid") or "")
@@ -6300,6 +6592,9 @@ class ShellWindow(Gtk.ApplicationWindow):
             resume_specific_game = bool(
                 game_record is not None and previous_appid != appid)
             _log(f"Resume background game: {g['name']} (appid={appid})")
+            # Resuming counts as opening: bump it to the front of the carousel
+            # (applied as soon as the DE loses focus to the game).
+            self._schedule_promote(appid=appid)
             if game_record is not None:
                 self._activate_game_record(game_record)
                 self._game_session_active = True
