@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import os
 """Console DE - PS5-style home shell."""
 
+import gc
 import glob
 import csv
 import configparser
@@ -21,32 +21,26 @@ import time
 HOME = os.path.expanduser("~")
 
 
-def _is_virtual_machine():
-    """Identify VMs so the CPU-drawn intro can use a cheaper frame profile."""
-    try:
-        with open("/proc/cpuinfo", errors="ignore") as cpuinfo:
-            if any("hypervisor" in line.split() for line in cpuinfo
-                   if line.startswith("flags") or line.startswith("Features")):
-                return True
-    except OSError:
-        pass
-    identity = ""
-    for path in ("/sys/class/dmi/id/sys_vendor",
-                 "/sys/class/dmi/id/product_name"):
-        try:
-            with open(path, errors="ignore") as dmi_file:
-                identity += " " + dmi_file.read()
-        except OSError:
-            pass
-    identity = identity.lower()
-    return any(token in identity for token in (
-        "qemu", "kvm", "virtualbox", "vmware", "bochs", "parallels",
-        "xen", "bhyve", "virt-manager",
-    ))
+class _FrameTimer:
+    """Accumulates animation time from the GTK frame clock.
 
+    The frame clock is paced by the display itself, so animations driven by
+    it stay even at any refresh rate (60, 120, 144 Hz, VRR). One long frame
+    (heavy work on the main loop) is clamped so it shows up as a brief pause
+    instead of the animation jumping ahead.
+    """
+    MAX_STEP = 0.1
 
-_LOW_PERF_MODE = _is_virtual_machine()
-_ANIMATION_INTERVAL_MS = 33 if _LOW_PERF_MODE else 16
+    def __init__(self):
+        self.elapsed = 0.0
+        self._last = None
+
+    def advance(self, frame_clock):
+        now = frame_clock.get_frame_time() / 1_000_000.0
+        if self._last is not None:
+            self.elapsed += min(max(0.0, now - self._last), self.MAX_STEP)
+        self._last = now
+        return self.elapsed
 
 # Set GDK_SCALE BEFORE importing GTK — must happen at module level
 # The DE shell keeps a fixed 3x visual design. The setting file controls
@@ -79,6 +73,93 @@ _env_scale = os.environ.get("GDK_SCALE", "unset")
 os.environ["GDK_SCALE"] = "1"
 os.environ["GDK_DPI_SCALE"] = "1"
 
+def _early_log(msg):
+    try:
+        with open(os.path.expanduser("~/.cache/console-de-shell.log"), "a") as _f:
+            _f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+def _wlr_read_outputs():
+    """[(name, enabled, scale)] from wlr-randr, or None when unavailable."""
+    wlr = shutil.which("wlr-randr")
+    if not wlr or not os.environ.get("WAYLAND_DISPLAY"):
+        return None
+    try:
+        listing = subprocess.run([wlr], capture_output=True, text=True,
+                                 timeout=8).stdout
+    except Exception as exc:
+        _early_log(f"wlr-randr listing failed: {exc}")
+        return None
+    outputs, cur = [], None
+    for line in listing.splitlines():
+        if line and not line[0].isspace():
+            if cur:
+                outputs.append(tuple(cur))
+            cur = [line.split()[0], True, None]
+        elif cur is not None:
+            low = line.strip().lower()
+            if low.startswith("enabled:"):
+                cur[1] = "yes" in low
+            elif low.startswith("scale:"):
+                try:
+                    cur[2] = float(low.split(":", 1)[1])
+                except ValueError:
+                    pass
+    if cur:
+        outputs.append(tuple(cur))
+    return outputs
+
+
+def _wlr_set_scale(names, scale):
+    wlr = shutil.which("wlr-randr")
+    ok = False
+    for name in names:
+        try:
+            result = subprocess.run(
+                [wlr, "--output", name, "--scale", f"{scale:g}"],
+                capture_output=True, text=True, timeout=8)
+            _early_log(f"wlr-randr {name} --scale {scale:g}: "
+                       f"rc={result.returncode} {result.stderr.strip()}")
+            ok = ok or result.returncode == 0
+        except Exception as exc:
+            _early_log(f"wlr-randr scale failed for {name}: {exc}")
+    return ok
+
+
+def _saved_display_scale():
+    """Saved scale (1.0 - 2.0) from the settings file, or None."""
+    try:
+        with open(os.path.expanduser("~/.config/console-de/scale")) as f:
+            return max(1.0, min(2.0, float(f.read().strip())))
+    except Exception:
+        return None
+
+
+def _sync_output_scale_with_saved():
+    """Make labwc's real output scale match the saved setting.
+
+    After a fresh login the compositor starts at whatever its own config says
+    (the old helper only understands whole numbers), while the shell shows the
+    saved value. Fix the output before the shell measures the screen.
+    Returns True when a change was made.
+    """
+    want = _saved_display_scale()
+    outputs = _wlr_read_outputs()
+    if want is None or not outputs:
+        return False
+    bad = [name for name, enabled, scale in outputs
+           if enabled and (scale is None or abs(scale - want) > 0.01)]
+    if not bad:
+        return False
+    _early_log(f"Output scale mismatch at startup ({bad}); applying {want:g}")
+    if _wlr_set_scale(bad, want):
+        time.sleep(0.6)  # let labwc resize the output before GTK reads it
+        return True
+    return False
+
+
 # Log before GTK import
 try:
     with open(os.path.expanduser("~/.cache/console-de-shell.log"), "a") as _f:
@@ -86,6 +167,11 @@ try:
                  f"SCALE: file={_scale} env_was={_env_scale} now={os.environ['GDK_SCALE']}\n")
 except Exception:
     pass
+
+try:
+    _sync_output_scale_with_saved()
+except Exception as _exc:
+    _early_log(f"Startup output scale sync failed: {_exc}")
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -126,12 +212,6 @@ try:
 except ImportError:
     HAVE_EVDEV = False
 
-try:
-    import cairo
-    HAVE_CAIRO = True
-except ImportError:
-    HAVE_CAIRO = False
-
 def _log(msg):
     try:
         with open(os.path.expanduser("~/.cache/console-de-shell.log"), "a") as f:
@@ -141,6 +221,11 @@ def _log(msg):
 
 
 _SETTINGS_GRADIENT_CACHE = {}
+
+
+CC_CELL_PCT = 6.0    # Control Center icon cell width, % of screen width
+CC_BOTTOM_PCT = 1.8  # gap between the Control Center row and the bottom edge, % of height
+CC_ICON_PCT = 4.6    # Control Center icon height, % of screen height
 
 
 def _paint_settings_gradient(cr, w, h):
@@ -240,20 +325,52 @@ def sh(cmd):
         _log(f"sh error: {e}")
 
 
+_SCALE_FILE = os.path.expanduser("~/.config/console-de/scale")
+# Selectable display scales: 100 %, 125 %, 133 %, 150 %, 166 %, 200 %.
+_DISPLAY_SCALES = [1.0, 1.25, 1.33, 1.5, 1.66, 2.0]
+
+
+def _read_display_scale(default=2.0):
+    """Current display scale as a float, clamped to the supported range."""
+    try:
+        with open(_SCALE_FILE) as scale_file:
+            value = float(scale_file.read().strip())
+        if value >= 1.0:
+            return min(value, 2.0)  # an old 3x setting becomes 200%
+    except Exception:
+        pass
+    return default
+
+
+def _format_scale(value):
+    """1.0 -> '1', 1.65 -> '1.65' (whole numbers stay plain integers)."""
+    value = round(float(value), 2)
+    return str(int(value)) if value == int(value) else f"{value:g}"
+
+
+def _format_scale_percent(value):
+    """1.0 -> '100 %', 1.66 -> '166 %' (display only; the file stays decimal)."""
+    return f"{int(round(float(value) * 100))} %"
+
+
+def _nearest_scale_index(value):
+    return min(range(len(_DISPLAY_SCALES)),
+               key=lambda i: abs(_DISPLAY_SCALES[i] - value))
+
+
 def _gpu_offload_env():
     """Env vars to force dGPU offload for launched games."""
     import os as _os
     env = dict(_os.environ)
     # Launched apps use the same scale as the labwc output. The shell itself
     # stays at GDK_SCALE=1 because it scales its UI manually.
-    try:
-        with open(_os.path.expanduser("~/.config/console-de/scale")) as scale_file:
-            app_scale = str(max(1, int(float(scale_file.read().strip()))))
-    except Exception:
-        app_scale = "3"
-    env["GDK_SCALE"] = app_scale
+    # GDK_SCALE only accepts integers: round a fractional scale up so GTK
+    # renders sharp buffers and the compositor scales them down to the
+    # fractional output scale. Qt accepts the exact fractional factor.
+    scale = _read_display_scale(2.0)
+    env["GDK_SCALE"] = str(max(1, math.ceil(scale - 1e-6)))
     env["GDK_DPI_SCALE"] = "1"
-    env["QT_SCALE_FACTOR"] = app_scale
+    env["QT_SCALE_FACTOR"] = _format_scale(scale)
     gpu = "nvidia"
     try:
         gpu = open(_os.path.expanduser("~/.config/console-de/gpu")).read().strip()
@@ -303,7 +420,18 @@ def take_screenshot():
     _log("no screenshot tool available (grim missing — run install.sh)")
     return None
 
+_LIB_CACHE = [0.0, []]
+
+
 def _steam_library_paths():
+    """Steam library folders, re-scanned at most every 10 s (art lookups call this a lot)."""
+    now = time.monotonic()
+    if now - _LIB_CACHE[0] > 10.0 or not _LIB_CACHE[1]:
+        _LIB_CACHE[:] = [now, _scan_steam_library_paths()]
+    return _LIB_CACHE[1]
+
+
+def _scan_steam_library_paths():
     """Discover all Steam library folders (including external drives)."""
     paths = set()
     data_home = os.environ.get(
@@ -343,118 +471,96 @@ def _steam_library_paths():
     return sorted(paths)
 
 
-def _art_candidates(appid, prefer):
+_ART_SUFFIXES = {
+    'tile': ("library_capsule.jpg", "library_hero.jpg",
+             "library_600x900.jpg", "header.jpg"),
+    'title': ("logo.png", "library_capsule.jpg", "library_hero.jpg"),
+    'bg': ("library_hero.jpg", "library_600x900.jpg",
+           "header.jpg", "library_capsule.jpg"),
+}
+_ART_CACHE = {}
+
+
+def _art_candidates(appid, prefer, deep=False):
     """Yield art paths for an appid, ordered by preference.
-    
-    prefer: 'tile' (capsule first), 'title' (logo.png first), 'bg' (hero first)
+
+    prefer: 'tile' (capsule first), 'title' (logo.png first), 'bg' (hero first).
+    deep=True adds the slow recursive glob fallback.
     """
+    suffixes = _ART_SUFFIXES[prefer]
     for lib in _steam_library_paths():
-        for base in [
-            os.path.join(lib, "appcache", "librarycache"),
-            os.path.join(lib, "steamapps", "appcache", "librarycache"),
-        ]:
+        bases = [os.path.join(lib, "appcache", "librarycache"),
+                 os.path.join(lib, "steamapps", "appcache", "librarycache")]
+        for base in bases:
             appdir = os.path.join(base, str(appid))
             if os.path.isdir(appdir):
-                # Direct files in appdir
-                if prefer == 'tile':
-                    suffixes = ("library_capsule.jpg", "library_hero.jpg",
-                                "library_600x900.jpg", "header.jpg")
-                elif prefer == 'title':
-                    suffixes = ("logo.png", "library_capsule.jpg",
-                                "library_hero.jpg")
-                else:  # bg
-                    suffixes = ("library_hero.jpg", "library_600x900.jpg",
-                                "header.jpg", "library_capsule.jpg")
-                for suffix in suffixes:
-                    p = os.path.join(appdir, suffix)
-                    if os.path.exists(p):
-                        yield p
-                # Hash-named subdirs
-                try:
-                    for entry in os.listdir(appdir):
-                        sub = os.path.join(appdir, entry)
-                        if not os.path.isdir(sub):
-                            continue
-                        if prefer == 'tile':
-                            sub_suffixes = ("library_capsule.jpg", "library_hero.jpg",
-                                            "library_600x900.jpg", "header.jpg")
-                        elif prefer == 'title':
-                            sub_suffixes = ("logo.png", "library_capsule.jpg",
-                                            "library_hero.jpg")
-                        else:
-                            sub_suffixes = ("library_hero.jpg", "library_600x900.jpg",
-                                            "header.jpg", "library_capsule.jpg")
-                        for suffix in sub_suffixes:
-                            p = os.path.join(sub, suffix)
-                            if os.path.exists(p):
-                                yield p
-                except Exception:
+                dirs = [appdir]
+                try:  # hash-named subdirs
+                    dirs += [d for d in (os.path.join(appdir, e)
+                                         for e in os.listdir(appdir))
+                             if os.path.isdir(d)]
+                except OSError:
                     pass
-            # Flat fallback
-            if prefer == 'tile':
-                flat_suffixes = ("library_capsule.jpg", "library_hero.jpg",
-                                 "library_600x900.jpg", "header.jpg")
-            elif prefer == 'title':
-                flat_suffixes = ("logo.png", "library_capsule.jpg",
-                                 "library_hero.jpg")
-            else:
-                flat_suffixes = ("library_hero.jpg", "library_600x900.jpg",
-                                 "header.jpg", "library_capsule.jpg")
-            for suffix in flat_suffixes:
-                p = os.path.join(base, f"{appid}_{suffix}")
-                if os.path.exists(p):
-                    yield p
-        # Glob fallback: any image matching appid anywhere under librarycache
-        for base in [os.path.join(lib, "appcache", "librarycache"),
-                     os.path.join(lib, "steamapps", "appcache", "librarycache")]:
-            if not os.path.exists(base):
-                continue
-            for p in glob.glob(os.path.join(base, "**", f"*{appid}*"), recursive=True):
-                if p.lower().endswith((".jpg", ".jpeg", ".png")):
-                    yield p
+                for d in dirs:
+                    for suffix in suffixes:
+                        path = os.path.join(d, suffix)
+                        if os.path.exists(path):
+                            yield path
+            for suffix in suffixes:  # flat layout
+                path = os.path.join(base, f"{appid}_{suffix}")
+                if os.path.exists(path):
+                    yield path
+        if deep:
+            for base in bases:
+                if os.path.exists(base):
+                    for path in glob.glob(os.path.join(
+                            base, "**", f"*{appid}*"), recursive=True):
+                        if path.lower().endswith((".jpg", ".jpeg", ".png")):
+                            yield path
+
+
+def _find_art(appid, prefer, must_contain=None, only=False):
+    """Best art path for an appid (cached); the slow glob runs only as a last resort."""
+    if not appid:
+        return None
+    key = (str(appid), prefer, must_contain, only)
+    if key in _ART_CACHE and (_ART_CACHE[key] is None or
+                              os.path.exists(_ART_CACHE[key])):
+        return _ART_CACHE[key]
+    result = None
+    for deep in (False, True):
+        first = None
+        for path in _art_candidates(appid, prefer, deep):
+            if must_contain is None:
+                result = path
+                break
+            if must_contain in path.lower() and (
+                    not only or path.lower().endswith(must_contain)):
+                result = path
+                break
+            first = first or path
+        else:
+            result = None if only else first
+        if result:
+            break
+    if result:  # only cache hits so newly downloaded art is still found
+        _ART_CACHE[key] = result
+    return result
 
 
 def _find_tile_art(appid):
-    """Square box/capsule art for game tiles. Prefers capsule.jpg."""
-    if not appid:
-        return None
-    candidates = list(_art_candidates(appid, 'tile'))
-    if not candidates:
-        return None
-    # Prefer capsule art (square) for tiles
-    for p in candidates:
-        if 'capsule' in p.lower():
-            return p
-    return candidates[0]
+    """Square box/capsule art for game tiles."""
+    return _find_art(appid, 'tile', 'capsule')
 
 
 def _find_title_art(appid):
-    """Stylized title logo (logo.png ONLY) for display above Play button.
-    Returns None if no logo.png exists — never falls back to tile art."""
-    if not appid:
-        return None
-    candidates = list(_art_candidates(appid, 'title'))
-    if not candidates:
-        return None
-    # Only accept logo.png — never tile/capsule art
-    for p in candidates:
-        if p.lower().endswith('logo.png'):
-            return p
-    return None
+    """Stylized title logo (logo.png ONLY); never falls back to tile art."""
+    return _find_art(appid, 'title', 'logo.png', only=True)
 
 
 def _find_bg_art(appid):
-    """Wide key art for full-bleed background. Prefers hero.jpg."""
-    if not appid:
-        return None
-    candidates = list(_art_candidates(appid, 'bg'))
-    if not candidates:
-        return None
-    # Prefer hero art for background
-    for p in candidates:
-        if 'hero' in p.lower():
-            return p
-    return candidates[0]
+    """Wide key art for full-bleed background. Prefers hero art."""
+    return _find_art(appid, 'bg', 'hero')
 
 
 def _bg_art_for(game):
@@ -475,7 +581,10 @@ def _cover_pixbuf(path, sw, sh):
     if pw <= 0 or ph <= 0:
         return None
     scale = max(sw / pw, sh / ph)
-    nw, nh = max(1, int(pw * scale)), max(1, int(ph * scale))
+    # ceil (not int) so the scaled image is never 1px smaller than the screen;
+    # a 1px shortfall made the result fail the exact-size check in
+    # _compose_background and fall back to a plain dark fill.
+    nw, nh = max(sw, math.ceil(pw * scale)), max(sh, math.ceil(ph * scale))
     pb = pb.scale_simple(nw, nh, GdkPixbuf.InterpType.BILINEAR)
     if nw > sw or nh > sh:
         x = max(0, (nw - sw) // 2)
@@ -501,12 +610,6 @@ class GameTile(Gtk.DrawingArea):
         self.shell = shell
         self.connect("draw", self._on_draw)
         self._load_art()
-
-    def set_morph(self, w, h, ring_alpha):
-        """Update animated size + selection ring alpha (morph transition)."""
-        self.set_size_request(int(w), int(h))
-        self.selected = ring_alpha > 0.5
-        self.queue_draw()
 
     def _load_art(self):
         art = self._get_game_art()
@@ -631,27 +734,6 @@ class GameTile(Gtk.DrawingArea):
         return False
 
 
-
-class GradientBG(Gtk.DrawingArea):
-    """Dark gradient painted over the background art for readability."""
-
-    def __init__(self):
-        super().__init__()
-        self.connect("draw", self._on_draw)
-
-    def _on_draw(self, widget, cr):
-        w = widget.get_allocated_width()
-        h = widget.get_allocated_height()
-        if HAVE_CAIRO:
-            grad = cairo.LinearGradient(0, 0, w, 0)
-            grad.add_color_stop_rgba(0.0, 0.02, 0.03, 0.05, 0.88)
-            grad.add_color_stop_rgba(0.55, 0.02, 0.03, 0.05, 0.55)
-            grad.add_color_stop_rgba(1.0, 0.02, 0.03, 0.05, 0.35)
-            cr.set_source(grad)
-        else:
-            cr.set_source_rgba(0.02, 0.03, 0.05, 0.6)
-        cr.paint()
-        return False
 
 
 def list_steam_games():
@@ -876,6 +958,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         # Recently-launched item promoted to front a few seconds after launch
         self._promote_appid = None
         self._promote_name = None
+        self._promote_app = None
         self._promote_timer_id = None
         # Steam client management (kept warm for fast game launches)
         # Remember game order across restarts (promoted games stay at front)
@@ -913,7 +996,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._startup_hidden = False
         self._carousel_intro_started = False
         self._carousel_intro_active = False
-        self._carousel_intro_start = None
+        self._carousel_intro_elapsed = 0.0
         self._carousel_intro_id = None
         self._carousel_intro_duration = 1.7
         self._topbar_fade_active = False
@@ -999,6 +1082,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._control_center_return_to_game = False
         self._active_game_appid = None
         self._active_game_name = ""
+        self._finished_external_ids = set()
         self._active_external_app = False
         self._active_external_launch_id = None
         self._opened_applications = []
@@ -1053,13 +1137,18 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.connect("motion-notify-event", self._on_pointer_motion)
         self.connect("destroy", self._on_destroy)
 
+        # Display Scale dropdown (settings popup list)
+        self._dd_widget = None
+        self._dd_rows = []
+        self._dd_items = []
+        self._dd_idx = 0
+        self._dd_row_h = 0
+
         # Background music (DE menu theme) — paused while a game/app is focused
         self._music_proc = None
         self._music_paused = False
         self.connect("focus-out-event", self._on_focus_out)
         self.connect("focus-in-event", self._on_focus_in)
-
-        self._start_process_logging()
 
         self._set_tab(0)
         # Startup screen shown while Steam/services get ready in the background
@@ -1069,6 +1158,10 @@ class ShellWindow(Gtk.ApplicationWindow):
         # unchanged; this only avoids constructing the UI on its first open.
         self._create_control_center(overlay)
         self.show_all()
+        # Nothing under the intro is visible, so keep the home UI out of the
+        # draw pass entirely until the transition reveals it.
+        self.main_box.hide()
+        self.topbar.hide()
         self._set_pointer_cursor_visible(False)
         self._orbit_last_frame_time = 0.0
         self._orbit_timer_id = self.add_tick_callback(self._tick_orbit_border)
@@ -1079,10 +1172,11 @@ class ShellWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(500, self._init_gamepad)
         self._gamepad_monitor_id = GLib.timeout_add(
             1000, self._monitor_gamepad_connection)
-        self._steam_game_refresh_timer_id = GLib.timeout_add_seconds(
-            4, self._refresh_steam_game_list)
+        self._steam_game_refresh_timer_id = None  # started once the intro ends
         # Launch audio pipeline once the window is visible
         GLib.timeout_add(100, self._start_music)
+        # A login script/helper can reset the output scale after we started
+        GLib.timeout_add(8000, self._verify_output_scale)
         # Ensure Steam is running in background (not suspended) for fast launches
         GLib.timeout_add(1500, self._ensure_steam_running)
         _log("ShellWindow created")
@@ -1456,7 +1550,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         dock.set_halign(Gtk.Align.CENTER)
         dock.set_valign(Gtk.Align.END)
         dock.set_size_request(-1, self._sh_pct(10))
-        dock.set_margin_bottom(self._sh_pct(4.5))
+        dock.set_margin_bottom(self._sh_pct(CC_BOTTOM_PCT))
         layer.add_overlay(dock)
 
         names = (
@@ -1470,8 +1564,10 @@ class ShellWindow(Gtk.ApplicationWindow):
         )
         icon_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "icons", "control_center")
-        cell_width = self._sw_pct(9.5)
-        icon_height = self._sh_pct(6.2)
+        # 11 cells must fit well inside the screen (11 x 6.975% = 76.7%);
+        # the Power popover position below is derived from the same width.
+        cell_width = self._sw_pct(CC_CELL_PCT)
+        icon_height = self._sh_pct(CC_ICON_PCT)
         for index, (name, icon_name) in enumerate(zip(names, icon_names)):
             cell = Gtk.EventBox()
             cell.set_visible_window(False)
@@ -1546,10 +1642,11 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.control_center_power_card.set_halign(Gtk.Align.START)
         self.control_center_power_card.set_valign(Gtk.Align.END)
         self.control_center_power_card.set_margin_start(
-            self._sw_pct((100 - 6.975 * len(names)) / 2)
-            + self._sw_pct(6.975) * 10
-            + self._sw_pct(6.975 / 2) - self._sw_pct(6.5))
-        self.control_center_power_card.set_margin_bottom(self._sh_pct(13.5))
+            self._sw_pct((100 - CC_CELL_PCT * len(names)) / 2)
+            + self._sw_pct(CC_CELL_PCT) * 10
+            + self._sw_pct(CC_CELL_PCT / 2) - self._sw_pct(6.5))
+        self.control_center_power_card.set_margin_bottom(
+            self._sh_pct(CC_BOTTOM_PCT + 9.0))
         self.control_center_power_card.set_size_request(self._sw_pct(13), -1)
         self.control_center_power_card.override_background_color(
             Gtk.StateFlags.NORMAL, Gdk.RGBA(0.10, 0.12, 0.16, 0.98))
@@ -1581,28 +1678,6 @@ class ShellWindow(Gtk.ApplicationWindow):
              ("Wayland Layer Shell OVERLAY surface" if self.control_center_window
               else "in-window overlay (compositor lacks Layer Shell)"))
 
-    def _destroy_control_center_surface(self):
-        """Destroy the Control Center window/widget tree after it closes."""
-        overlay = self.control_center_overlay
-        window = self.control_center_window
-        if window is not None:
-            window.destroy()
-        elif overlay is not None:
-            try:
-                self._overlay.remove_overlay(overlay)
-            except Exception:
-                pass
-            try:
-                overlay.destroy()
-            except Exception:
-                pass
-        self.control_center_overlay = None
-        self.control_center_window = None
-        self.control_center_power_card = None
-        self.control_center_power_buttons.clear()
-        self.control_center_items.clear()
-        _log("Control Center overlay destroyed")
-
     def _update_control_center_selection(self):
         if not self.control_center_items:
             return
@@ -1630,6 +1705,7 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _toggle_control_center(self):
         """Open or close Control Center above the current foreground surface."""
+        self._close_scale_dropdown()
         if not self._startup_hidden:
             return
         if self._launch_cover is not None:
@@ -1889,32 +1965,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         else:
             self.fullscreen()
 
-    def _gnome_shell_eval(self, script):
-        """Run a small GNOME Shell window-management action when available."""
-        gdbus = shutil.which("gdbus")
-        if not gdbus:
-            _log("GNOME window action unavailable: gdbus is not installed")
-            return False
-        try:
-            result = subprocess.run(
-                [gdbus, "call", "--session", "--dest", "org.gnome.Shell",
-                 "--object-path", "/org/gnome/Shell", "--method",
-                 "org.gnome.Shell.Eval", script],
-                capture_output=True, text=True, timeout=2)
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip()
-                _log(f"GNOME window action unavailable: {detail[:240]}")
-                return False
-            output = result.stdout.strip()
-            if not output.startswith("(true,"):
-                _log(f"GNOME window action rejected: {output[:240]}")
-                return None
-            _log("GNOME window action completed")
-            return output
-        except Exception as exc:
-            _log(f"GNOME window action failed: {exc}")
-            return None
-
     def _send_labwc_keybind(self, key_code, shift=False):
         """Send a compositor keybind through uinput for labwc window actions."""
         if not HAVE_EVDEV:
@@ -2005,32 +2055,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             _log("Resume sent Labwc PreviousWindowImmediate to focus the game")
         else:
             _log("Resume could not dispatch Labwc PreviousWindowImmediate")
-        return False
-
-    def _minimize_focused_game_window(self):
-        """Minimize the active game before raising the DE over it."""
-        tokens = [token for token in re.findall(
-            r"[a-z0-9]+", (self._active_game_name or "").lower())
-                  if len(token) > 2]
-        if not tokens:
-            return False
-        # Window titles often omit subtitles and punctuation from Steam's game
-        # name. The longest title word is usually distinctive enough to match.
-        token_js = json.dumps(max(tokens, key=len))
-        script = (
-            "(function(){let w=global.display.get_focus_window();"
-            "if(!w)return 'no focused window';"
-            "let t=w.get_title()||'';let n=t.toLowerCase();let q=" + token_js + ";"
-            "if(!n.includes(q))return 'focused window is not the game: '+t;"
-            "w.minimize();return 'minimized '+t;})()")
-        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-        result = self._gnome_shell_eval(script) if "gnome" in desktop else None
-        if result and "minimized" in result.lower():
-            return True
-        if "gnome" not in desktop:
-            if self._send_labwc_keybind(ecodes.KEY_I if HAVE_EVDEV else 0):
-                _log("Requested game minimize through labwc Super+I binding")
-                return True
         return False
 
     def _schedule_background_game_suspend(self):
@@ -2503,15 +2527,16 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _animate_status_notices(self, start_opacity, end_opacity):
         if self._status_notice_fade_id is not None:
-            GLib.source_remove(self._status_notice_fade_id)
+            self.remove_tick_callback(self._status_notice_fade_id)
+            self._status_notice_fade_id = None
         self._status_notice_fade_from = start_opacity
         self._status_notice_fade_to = end_opacity
-        self._status_notice_fade_start = time.monotonic()
-        self._status_notice_fade_id = GLib.timeout_add(
-            16, self._on_status_notice_fade)
+        self._status_notice_fade_clock = _FrameTimer()
+        self._status_notice_fade_id = self.add_tick_callback(
+            self._on_status_notice_fade)
 
-    def _on_status_notice_fade(self):
-        elapsed = time.monotonic() - self._status_notice_fade_start
+    def _on_status_notice_fade(self, _widget, frame_clock, _user_data=None):
+        elapsed = self._status_notice_fade_clock.advance(frame_clock)
         progress = min(1.0, elapsed / self._status_notice_fade_duration)
         eased = _cubic_bezier_y(progress)
         opacity = (self._status_notice_fade_from +
@@ -2524,8 +2549,8 @@ class ShellWindow(Gtk.ApplicationWindow):
                     4, self._begin_status_notice_fadeout)
             else:
                 self.status_notice_box.hide()
-            return False
-        return True
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def _begin_status_notice_fadeout(self):
         self._status_notice_dismiss_id = None
@@ -2788,6 +2813,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         grid.set_margin_end(self._sw_pct(6))
         grid.set_margin_bottom(self._sh_pct(5))
         self.app_grid = grid
+        self.app_scrolled = scrolled
+        scrolled.connect("scroll-event", self._on_inverted_scroll)
 
         usable_width = self._sw * 0.88
         target_tile_width = self._sw * 0.15
@@ -2843,6 +2870,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         grid.set_margin_end(self._sw_pct(6))
         grid.set_margin_bottom(self._sh_pct(5))
         self.all_games_scrolled = scrolled
+        scrolled.connect("scroll-event", self._on_inverted_scroll)
         self.all_games_grid = grid
 
         usable_width = self._sw * 0.88
@@ -3049,6 +3077,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.app_grid.remove(self._apps_loading_label)
             self._apps_loading_label = None
         tile = self._create_app_tile(app, index == self.asel)
+        tile._app = app  # the tile, not a list index, decides what launches
         tile.set_size_request(self._app_tile_width, self._app_tile_width)
         tile.set_hexpand(True)
         tile.set_halign(Gtk.Align.FILL)
@@ -3122,9 +3151,44 @@ class ShellWindow(Gtk.ApplicationWindow):
             tile.get_style_context().add_class("selected")
         return tile
 
+    def _selected_app(self):
+        """The app shown in the highlighted tile (falls back to the list)."""
+        tiles = getattr(self, "app_tiles", [])
+        if 0 <= self.asel < len(tiles):
+            app = getattr(tiles[self.asel], "_app", None)
+            if app is not None:
+                return app
+        if 0 <= self.asel < len(self.apps):
+            return self.apps[self.asel]
+        return None
+
+    def _sync_app_tiles_to_order(self):
+        """Make the grid follow self.apps after the list was reordered."""
+        tiles = getattr(self, "app_tiles", [])
+        by_app = {id(getattr(t, "_app", None)): t for t in tiles}
+        complete = (len(tiles) == len(self.apps) and
+                    all(id(a) in by_app for a in self.apps))
+        for tile in tiles:
+            self.app_grid.remove(tile)
+        if complete:
+            self.app_tiles = [by_app[id(a)] for a in self.apps]
+            for i, tile in enumerate(self.app_tiles):
+                self.app_grid.attach(tile, i % self._app_cols,
+                                     i // self._app_cols, 1, 1)
+        else:
+            # Grid only partly built: start over so tiles match the new order.
+            self.app_tiles = []
+            self._app_tile_build_index = 0
+            if self.tab == 1:
+                self._start_app_tile_build()
+
     def _on_app_tile_press(self, _widget, event, index):
         if event.button != 1:
             return False
+        try:
+            index = self.app_tiles.index(_widget)
+        except ValueError:
+            pass
         self.asel = index
         self._refresh_app_selection()
         self._play_sfx("PS5_Select")
@@ -3173,62 +3237,39 @@ class ShellWindow(Gtk.ApplicationWindow):
             else:
                 ctx.remove_class("selected")
             tile.queue_draw()
+        self._scroll_apps_to_selection()
 
-    def _create_game_tile(self, game, selected, position=0):
-        # PS5: squircle tile — art clipped to rounded corners via Cairo
-        tile_w = self._sw_pct(11 if selected else 8)
-        tile_h = tile_w  # square
-        tile = GameTile(game, tile_w, tile_h, selected)
-        # Left margin: big if first item selected (position 0, gsel==0),
-        # small otherwise so tiles sit snug against each other
-        if position == 0:
-            tile.set_margin_start(self._sw_pct(8) if self.gsel == 0 else self._sw_pct(2))
-        else:
-            tile.set_margin_start(0)
-        return tile
-
-    def _make_bottom_panel(self, title, icons):
-        """PS5 bottom info panel: title left, icon+value chips right."""
-        panel = Gtk.EventBox()
-        panel.set_size_request(-1, self._sh_pct(6))
-        panel.override_background_color(
-            Gtk.StateFlags.NORMAL, Gdk.RGBA(0.11, 0.13, 0.16, 0.9))
-        panel.override_background_color(
-            Gtk.StateFlags.NORMAL, Gdk.RGBA(0.14, 0.17, 0.21, 1.0))
-
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        box.set_margin_start(self._sw_pct(2))
-        box.set_margin_end(self._sw_pct(2))
-
-        t = Gtk.Label(label=title)
-        t.set_halign(Gtk.Align.START)
-        t.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(0.62, 0.64, 0.69, 1.0))
-        t.set_name("panel-title")
-        box.pack_start(t, True, True, 0)
-
-        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                        spacing=self._font_px(8))
-        chips.set_halign(Gtk.Align.END)
-        for val, _icon in icons:
-            chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                           spacing=self._font_px(4))
-            chip.set_halign(Gtk.Align.END)
-            v = Gtk.Label(label=val)
-            v.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(1, 1, 1, 1))
-            v.set_name("panel-value")
-            chip.pack_start(v, False, False, 0)
-            chips.pack_start(chip, False, False, 0)
-        box.pack_start(chips, False, False, 0)
-
-        panel.add(box)
-        return panel
+    def _scroll_apps_to_selection(self):
+        """Keep the selected app tile inside the visible part of the grid."""
+        tiles = getattr(self, "app_tiles", [])
+        if not tiles or self.asel >= len(tiles):
+            return
+        adj = self.app_scrolled.get_vadjustment()
+        if self.asel < self._app_cols:
+            adj.set_value(0)  # first row: show the top margin too
+            return
+        tile = tiles[self.asel]
+        grid = self.app_grid
+        pos = tile.translate_coordinates(grid, 0, 0)
+        if pos is None:
+            return
+        top = pos[1] + grid.get_margin_top()
+        bottom = top + tile.get_allocated_height()
+        pad = self._sh_pct(3)
+        view_top = adj.get_value()
+        view_h = adj.get_page_size()
+        if top - pad < view_top:
+            adj.set_value(max(0, top - pad))
+        elif bottom + pad > view_top + view_h:
+            adj.set_value(bottom + pad - view_h)
 
     def _build_settings_data(self):
         return [
             {"name": "Display", "options": [
                 {"label": "Display Scale", "get": self._get_scale_label,
-                 "cb": self._on_scale_changed,
-                 "cb_backward": self._on_scale_changed_backward},
+                 "cb": self._open_scale_dropdown,
+                 "cb_backward": self._open_scale_dropdown,
+                 "dropdown": True},
                 {"label": "GPU", "get": self._get_gpu_label,
                  "cb": self._on_gpu_changed,
                  "cb_backward": self._on_gpu_changed_backward},
@@ -3400,7 +3441,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         for opt in cat["options"]:
             self._add_setting_row(self.options_box, opt["label"],
                                   opt["get"](), opt["cb"],
-                                  opt.get("action", False))
+                                  opt.get("action", False),
+                                  dropdown=opt.get("dropdown", False))
         if self.settings_opt >= len(self.settings_rows):
             self.settings_opt = 0
         self._refresh_settings_highlight()
@@ -3564,6 +3606,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_vexpand(True)
+        scroll.connect("scroll-event", self._on_inverted_scroll)
         process_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                               spacing=self._font_px(3))
         scroll.add(process_box)
@@ -3733,7 +3776,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._rebuild_options()
         return True
 
-    def _add_setting_row(self, parent, label, value, callback, action=False):
+    def _add_setting_row(self, parent, label, value, callback, action=False,
+                         dropdown=False):
         row = Gtk.EventBox()
         row.connect_after("draw", self._draw_orbit_widget)
         row.set_hexpand(True)
@@ -3764,7 +3808,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         parent.pack_start(row, False, False, self._font_px(4))
         self.settings_rows.append({
             'widget': row, 'label': lbl, 'value_label': val_label,
-            'callback': callback, 'action': action,
+            'callback': callback, 'action': action, 'dropdown': dropdown,
         })
         return row
 
@@ -3793,12 +3837,12 @@ class ShellWindow(Gtk.ApplicationWindow):
                 row['widget'].get_style_context().add_class("selected")
             row['widget'].queue_draw()
 
+    @staticmethod
+    def _scale_row_text(value):
+        return f"{_format_scale_percent(value)}  \u25BE"
+
     def _get_scale_label(self):
-        try:
-            with open(os.path.expanduser("~/.config/console-de/scale")) as f:
-                return f"{int(f.read().strip())}x"
-        except Exception:
-            return "2x"
+        return self._scale_row_text(_read_display_scale())
 
     def _get_gpu_label(self):
         try:
@@ -3822,211 +3866,298 @@ class ShellWindow(Gtk.ApplicationWindow):
         except Exception:
             return "600"
 
+    @staticmethod
+    def _set_outputs_scale_wlr(scale):
+        """Set every enabled output to the exact (possibly fractional) scale.
+
+        The older helper script only understands whole numbers, so a value
+        like 1.65 would silently fall back to 1x. wlr-randr takes floats.
+        """
+        outputs = _wlr_read_outputs()
+        if outputs is None:
+            _log("wlr-randr unavailable; fractional output scale not applied")
+            return False
+        names = [name for name, enabled, _scale in outputs if enabled]
+        return _wlr_set_scale(names, scale) if names else False
+
+    def _verify_output_scale(self):
+        """Shortly after login: re-check the output scale, fix once if reset."""
+        def worker():
+            want = _saved_display_scale()
+            outputs = _wlr_read_outputs()
+            if want is None or not outputs:
+                return
+            bad = [n for n, en, sc in outputs
+                   if en and (sc is None or abs(sc - want) > 0.01)]
+            if not bad or os.environ.get("CONSOLE_DE_SCALE_RETRY"):
+                return
+            _log(f"Output scale was reset after startup ({bad}); reapplying {want:g}")
+            if _wlr_set_scale(bad, want):
+                os.environ["CONSOLE_DE_SCALE_RETRY"] = "1"  # only one retry
+                GLib.idle_add(self._schedule_shell_restart)
+        threading.Thread(target=worker, name="scale-verify", daemon=True).start()
+        return False
+
     def _apply_display_scale_setting(self, scale):
         """Apply labwc output/app scaling, then restart shell at its fixed 3x UI."""
         helper = os.path.expanduser("~/.config/console-de/labwc-output-scale.py")
-        try:
-            with open(os.path.expanduser("~/.cache/console-de-output-scale.log"), "a") as log_file:
-                subprocess.Popen(
-                    [sys.executable, helper], stdout=log_file, stderr=log_file,
-                    start_new_session=True)
-            _log(f"Requested labwc and app scale update to {scale}x")
-        except Exception as exc:
-            _log(f"Could not start labwc scale update: {exc}")
+
+        def worker():
+            try:
+                with open(os.path.expanduser("~/.cache/console-de-output-scale.log"), "a") as log_file:
+                    proc = subprocess.Popen(
+                        [sys.executable, helper], stdout=log_file, stderr=log_file,
+                        start_new_session=True)
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        _log("labwc scale helper still running after 15s")
+                _log(f"Requested labwc and app scale update to {scale}x")
+            except Exception as exc:
+                _log(f"Could not start labwc scale update: {exc}")
+            # Run after the helper so the exact value wins over any rounding.
+            self._set_outputs_scale_wlr(scale)
+            GLib.idle_add(self._schedule_shell_restart)
+
+        threading.Thread(target=worker, name="display-scale-apply",
+                         daemon=True).start()
+
+    def _schedule_shell_restart(self):
         # Recreate the shell after labwc changes the output's logical size.
         GLib.timeout_add(700, self._restart_shell)
+        return False
 
-    def _on_scale_changed(self):
+    def _set_display_scale(self, value):
+        """Persist a new display scale, refresh the row, and apply it."""
+        text = _format_scale(value)
+        with open(_SCALE_FILE, "w") as f:
+            f.write(text)
+        for row in self.settings_rows:
+            if row.get('dropdown') and row['label'].get_text() == "Display Scale":
+                row['value_label'].set_text(self._scale_row_text(value))
+        _log(f"Display/app scale changed to {text}x")
+        self._apply_display_scale_setting(value)
+
+    # ---- Display Scale dropdown ----
+
+    def _on_inverted_scroll(self, scrolled, event):
+        """Scroll lists the opposite way to GTK's default (touchpad/wheel)."""
+        adj = scrolled.get_vadjustment()
+        if adj is None:
+            return False
+        step = max(1.0, adj.get_page_size()) ** (2.0 / 3.0)
+        if event.direction == Gdk.ScrollDirection.SMOOTH:
+            ok, _dx, dy = event.get_scroll_deltas()
+            if not ok:
+                return False
+            delta = dy * step
+        elif event.direction == Gdk.ScrollDirection.UP:
+            delta = -step
+        elif event.direction == Gdk.ScrollDirection.DOWN:
+            delta = step
+        else:
+            return False
+        top = max(adj.get_lower(), adj.get_upper() - adj.get_page_size())
+        adj.set_value(max(adj.get_lower(), min(top, adj.get_value() - delta)))
+        return True
+
+    def _open_scale_dropdown(self):
+        """Pop a list of scales under the Display Scale row."""
+        if self._dd_widget is not None:
+            return
+        if not (0 <= self.settings_opt < len(self.settings_rows)):
+            return
+        anchor = self.settings_rows[self.settings_opt]['widget']
+        self._dd_items = list(_DISPLAY_SCALES)
+        current = _read_display_scale()
+        self._dd_idx = _nearest_scale_index(current)
+        self._dd_row_h = self._sh_pct(5)
+        visible = len(self._dd_items)
+        width = self._sw_pct(14)
+        height = self._dd_row_h * visible
+
+        frame = Gtk.Frame()
+        frame.set_shadow_type(Gtk.ShadowType.NONE)
+        frame.set_halign(Gtk.Align.START)
+        frame.set_valign(Gtk.Align.START)
+        frame.set_size_request(width, height)
+        frame.override_background_color(
+            Gtk.StateFlags.NORMAL, Gdk.RGBA(0.08, 0.10, 0.14, 0.98))
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
+        sw.set_min_content_height(height)
+        sw.connect("scroll-event", self._on_inverted_scroll)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._dd_rows = []
+        for i, val in enumerate(self._dd_items):
+            ev = Gtk.EventBox()
+            ev.set_size_request(-1, self._dd_row_h)
+            lbl = Gtk.Label()
+            mark = "  \u2713" if i == _nearest_scale_index(current) else ""
+            lbl.set_text(f"{_format_scale_percent(val)}{mark}")
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_margin_start(self._sw_pct(1.5))
+            lbl.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(1, 1, 1, 1))
+            ev.add(lbl)
+            ev.connect("button-press-event", self._on_scale_dropdown_click, i)
+            box.pack_start(ev, False, False, 0)
+            self._dd_rows.append(ev)
+        sw.add(box)
+        frame.add(sw)
+        self._dd_scroller = sw
+
+        # Place it just below the row, right-aligned with it; flip above
+        # the row if there is no room underneath.
+        margin_x, margin_y = self._sw_pct(60), self._sh_pct(20)
         try:
-            with open(os.path.expanduser("~/.config/console-de/scale")) as f:
-                current = int(f.read().strip())
+            pos = anchor.translate_coordinates(self._overlay, 0, 0)
+            if pos is not None:
+                x, y = pos
+                rw = anchor.get_allocated_width()
+                rh = anchor.get_allocated_height()
+                margin_x = max(0, x + rw - self._sw_pct(2) - width)
+                margin_y = y + rh
+                if margin_y + height > self._overlay.get_allocated_height() - self._sh_pct(2):
+                    margin_y = max(self._sh_pct(2), y - height)
+        except Exception as exc:
+            _log(f"Scale dropdown placement fallback: {exc}")
+        frame.set_margin_start(margin_x)
+        frame.set_margin_top(margin_y)
+
+        self._overlay.add_overlay(frame)
+        self._dd_widget = frame
+        frame.show_all()
+        self._refresh_scale_dropdown()
+        GLib.idle_add(self._scroll_scale_dropdown)
+        _log("Scale dropdown opened")
+
+    def _refresh_scale_dropdown(self):
+        for i, ev in enumerate(self._dd_rows):
+            on = (i == self._dd_idx)
+            ev.override_background_color(
+                Gtk.StateFlags.NORMAL,
+                Gdk.RGBA(0.20, 0.25, 0.35, 1.0) if on
+                else Gdk.RGBA(0.08, 0.10, 0.14, 0.0))
+            ev.queue_draw()
+        self._scroll_scale_dropdown()
+
+    def _scroll_scale_dropdown(self):
+        sw = getattr(self, "_dd_scroller", None)
+        if self._dd_widget is None or sw is None:
+            return False
+        adj = sw.get_vadjustment()
+        top = self._dd_idx * self._dd_row_h
+        bottom = top + self._dd_row_h
+        page = adj.get_page_size()
+        if top < adj.get_value():
+            adj.set_value(top)
+        elif page > 0 and bottom > adj.get_value() + page:
+            adj.set_value(bottom - page)
+        return False
+
+    def _scale_dropdown_move(self, delta):
+        new_idx = max(0, min(len(self._dd_items) - 1, self._dd_idx + delta))
+        if new_idx != self._dd_idx:
+            self._dd_idx = new_idx
+            self._refresh_scale_dropdown()
+            self._play_sfx("PS5_Change")
+
+    def _close_scale_dropdown(self):
+        if self._dd_widget is None:
+            return
+        try:
+            self._overlay.remove(self._dd_widget)
         except Exception:
-            current = 2
-        next_scale = (current % 3) + 1
-        with open(os.path.expanduser("~/.config/console-de/scale"), "w") as f:
-            f.write(str(next_scale))
-        if self.settings_rows:
-            self.settings_rows[0]['value_label'].set_text(f"{next_scale}x")
-        _log(f"Display/app scale changed to {next_scale}x")
-        self._apply_display_scale_setting(next_scale)
+            pass
+        self._dd_widget = None
+        self._dd_rows = []
+        self._dd_scroller = None
+        _log("Scale dropdown closed")
+
+    def _commit_scale_dropdown(self):
+        if self._dd_widget is None:
+            return
+        value = self._dd_items[self._dd_idx]
+        changed = (_nearest_scale_index(_read_display_scale()) != self._dd_idx)
+        self._close_scale_dropdown()
+        if changed:
+            self._set_display_scale(value)
+
+    def _on_scale_dropdown_click(self, widget, event, idx):
+        self._dd_idx = idx
+        self._play_sfx("PS5_Select")
+        self._commit_scale_dropdown()
+        return True
 
     def _restart_shell(self):
         _log("shell re-exec to apply new scale")
+        # exec keeps our PID, so the music group is not tied to a dying parent:
+        # stop it here or the new shell starts a second copy and the old one
+        # plays forever (even after logout).
+        self._stop_music()
         try:
             os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
         except Exception as e:
             _log(f"restart failed: {e}")
         return False
 
-    def _on_gpu_changed(self):
-        options = ["nvidia", "amd", "off"]
-        try:
-            with open(os.path.expanduser("~/.config/console-de/gpu")) as f:
-                current = f.read().strip()
-        except Exception:
-            current = "nvidia"
-        idx = options.index(current) if current in options else 0
-        next_gpu = options[(idx + 1) % len(options)]
-        with open(os.path.expanduser("~/.config/console-de/gpu"), "w") as f:
-            f.write(next_gpu)
-        if len(self.settings_rows) > 1:
-            self.settings_rows[1]['value_label'].set_text(next_gpu.upper())
-        _log(f"GPU changed to {next_gpu}")
+    _SETTING_CHOICES = {
+        "gpu": (["nvidia", "amd", "off"], 1),
+        "size": ([0.7, 1.0, 1.3, 1.6, 2.0], 2),
+        "weight": ([400, 600, 800], 3),
+    }
 
-    def _on_menu_font_size_changed(self):
+    def _apply_tab_font(self, size, weight):
+        """Restyle the tab labels live (no restart needed)."""
+        css = (f"#tab-label {{ font-weight: {weight}; "
+               f"font-size: {self._font_px(int(10 * size))}px; }}")
         try:
-            with open(_menu_font_size_file) as f:
-                current = float(f.read().strip())
-        except Exception:
-            current = 1.0
-        sizes = [0.7, 1.0, 1.3, 1.6, 2.0]
-        idx = sizes.index(current) if current in sizes else 1
-        next_size = sizes[(idx + 1) % len(sizes)]
-        with open(_menu_font_size_file, "w") as f:
-            f.write(str(next_size))
-        # Update CSS without restart
-        self._apply_css()
-        provider = Gtk.CssProvider()
-        # Re-apply by reading the CSS we just generated
-        m = self._m
-        css = f"""
-        #tab-label {{
-            font-weight: {_menu_font_weight};
-            font-size: {self._font_px(int(10 * next_size))}px;
-        }}
-        """
-        try:
+            provider = Gtk.CssProvider()
             provider.load_from_data(css.encode())
             Gtk.StyleContext.add_provider_for_screen(
                 Gdk.Screen.get_default(), provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         except Exception as e:
             _log(f"menu font CSS failed: {e}")
-        if len(self.settings_rows) > 2:
-            self.settings_rows[2]['value_label'].set_text(f"{next_size:.1f}x")
-        _log(f"Menu font size changed to {next_size}x")
 
-    def _on_menu_font_weight_changed(self):
+    def _cycle_setting(self, key, step):
+        """Step a GPU / menu font size / menu font weight choice and save it."""
+        global _menu_font_size, _menu_font_weight
+        options, row = self._SETTING_CHOICES[key]
+        path, cast, default = {
+            "gpu": (os.path.expanduser("~/.config/console-de/gpu"), str, "nvidia"),
+            "size": (_menu_font_size_file, float, 1.0),
+            "weight": (_menu_font_weight_file, int, 600),
+        }[key]
         try:
-            with open(_menu_font_weight_file) as f:
-                current = int(f.read().strip())
+            with open(path) as f:
+                current = cast(f.read().strip())
         except Exception:
-            current = 600
-        weights = [400, 600, 800]
-        idx = weights.index(current) if current in weights else 1
-        next_weight = weights[(idx + 1) % len(weights)]
-        with open(_menu_font_weight_file, "w") as f:
-            f.write(str(next_weight))
-        # Update CSS without restart
-        m = self._m
-        css = f"""
-        #tab-label {{
-            font-weight: {next_weight};
-            font-size: {self._font_px(int(10 * _menu_font_size))}px;
-        }}
-        """
-        try:
-            provider = Gtk.CssProvider()
-            provider.load_from_data(css.encode())
-            Gtk.StyleContext.add_provider_for_screen(
-                Gdk.Screen.get_default(), provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        except Exception as e:
-            _log(f"menu font weight CSS failed: {e}")
-        if len(self.settings_rows) > 3:
-            self.settings_rows[3]['value_label'].set_text(f"{next_weight}")
-        _log(f"Menu font weight changed to {next_weight}")
+            current = default
+        idx = options.index(current) if current in options else options.index(default)
+        value = options[(idx + step) % len(options)]
+        with open(path, "w") as f:
+            f.write(str(value))
+        if key == "size":
+            _menu_font_size = value
+        elif key == "weight":
+            _menu_font_weight = value
+        if key != "gpu":
+            self._apply_tab_font(_menu_font_size, _menu_font_weight)
+        text = (value.upper() if key == "gpu" else
+                f"{value:.1f}x" if key == "size" else str(value))
+        if len(self.settings_rows) > row:
+            self.settings_rows[row]['value_label'].set_text(text)
+        _log(f"{key} setting changed to {value}")
 
-    def _on_scale_changed_backward(self):
-        try:
-            with open(os.path.expanduser("~/.config/console-de/scale")) as f:
-                current = int(f.read().strip())
-        except Exception:
-            current = 2
-        scales = [1, 2, 3]
-        idx = scales.index(current) if current in scales else 1
-        next_scale = scales[(idx - 1) % len(scales)]
-        with open(os.path.expanduser("~/.config/console-de/scale"), "w") as f:
-            f.write(str(next_scale))
-        if self.settings_rows:
-            self.settings_rows[0]['value_label'].set_text(f"{next_scale}x")
-        _log(f"Display/app scale changed to {next_scale}x")
-        self._apply_display_scale_setting(next_scale)
+    def _on_gpu_changed(self): self._cycle_setting("gpu", 1)
+    def _on_gpu_changed_backward(self): self._cycle_setting("gpu", -1)
+    def _on_menu_font_size_changed(self): self._cycle_setting("size", 1)
+    def _on_menu_font_size_changed_backward(self): self._cycle_setting("size", -1)
+    def _on_menu_font_weight_changed(self): self._cycle_setting("weight", 1)
+    def _on_menu_font_weight_changed_backward(self): self._cycle_setting("weight", -1)
 
-    def _on_gpu_changed_backward(self):
-        options = ["nvidia", "amd", "off"]
-        try:
-            with open(os.path.expanduser("~/.config/console-de/gpu")) as f:
-                current = f.read().strip()
-        except Exception:
-            current = "nvidia"
-        idx = options.index(current) if current in options else 0
-        next_gpu = options[(idx - 1) % len(options)]
-        with open(os.path.expanduser("~/.config/console-de/gpu"), "w") as f:
-            f.write(next_gpu)
-        if len(self.settings_rows) > 1:
-            self.settings_rows[1]['value_label'].set_text(next_gpu.upper())
-        _log(f"GPU changed to {next_gpu}")
-
-    def _on_menu_font_size_changed_backward(self):
-        try:
-            with open(_menu_font_size_file) as f:
-                current = float(f.read().strip())
-        except Exception:
-            current = 1.0
-        sizes = [0.7, 1.0, 1.3, 1.6, 2.0]
-        idx = sizes.index(current) if current in sizes else 1
-        next_size = sizes[(idx - 1) % len(sizes)]
-        with open(_menu_font_size_file, "w") as f:
-            f.write(str(next_size))
-        m = self._m
-        css = f"""
-        #tab-label {{
-            font-weight: {_menu_font_weight};
-            font-size: {self._font_px(int(10 * next_size))}px;
-        }}
-        """
-        try:
-            provider = Gtk.CssProvider()
-            provider.load_from_data(css.encode())
-            Gtk.StyleContext.add_provider_for_screen(
-                Gdk.Screen.get_default(), provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        except Exception as e:
-            _log(f"menu font size backward CSS failed: {e}")
-        if len(self.settings_rows) > 2:
-            self.settings_rows[2]['value_label'].set_text(f"{next_size:.1f}x")
-        _log(f"Menu font size changed to {next_size}x")
-
-    def _on_menu_font_weight_changed_backward(self):
-        try:
-            with open(_menu_font_weight_file) as f:
-                current = int(f.read().strip())
-        except Exception:
-            current = 600
-        weights = [400, 600, 800]
-        idx = weights.index(current) if current in weights else 1
-        next_weight = weights[(idx - 1) % len(weights)]
-        with open(_menu_font_weight_file, "w") as f:
-            f.write(str(next_weight))
-        m = self._m
-        css = f"""
-        #tab-label {{
-            font-weight: {next_weight};
-            font-size: {self._font_px(int(10 * _menu_font_size))}px;
-        }}
-        """
-        try:
-            provider = Gtk.CssProvider()
-            provider.load_from_data(css.encode())
-            Gtk.StyleContext.add_provider_for_screen(
-                Gdk.Screen.get_default(), provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        except Exception as e:
-            _log(f"menu font weight backward CSS failed: {e}")
-        if len(self.settings_rows) > 3:
-            self.settings_rows[3]['value_label'].set_text(f"{next_weight}")
-        _log(f"Menu font weight changed to {next_weight}")
 
     def _is_printable_key(self, kv):
         """Check if a keyval is a printable character."""
@@ -4072,21 +4203,27 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _apply_text_input(self, text):
         """Apply typed text to the current setting."""
+        global _menu_font_size, _menu_font_weight
         opt_idx = self.settings_opt
         opt = self.settings_rows[opt_idx]
         label = opt['label'].get_text()
 
         try:
             if label == "Display Scale":
-                val = int(text)
-                if val not in (1, 2, 3):
-                    _log(f"Invalid scale: {val}, must be 1/2/3")
+                raw = text.strip().lower().rstrip("x")
+                val = float(raw.rstrip("%"))
+                if raw.endswith("%") or val > 10:
+                    val /= 100.0  # "165" or "165%" means 165%
+                val = round(val, 2)
+                if not 1.0 <= val <= 2.0:
+                    _log(f"Invalid scale: {val}, must be between 100% and 200%")
                     return
-                with open(os.path.expanduser("~/.config/console-de/scale"), "w") as f:
-                    f.write(str(val))
-                opt['value_label'].set_text(f"{val}x")
-                _log(f"Scale set to {val}x — restarting shell")
-                GLib.timeout_add(500, self._restart_shell)
+                val_text = _format_scale(val)
+                with open(_SCALE_FILE, "w") as f:
+                    f.write(val_text)
+                opt['value_label'].set_text(self._scale_row_text(val))
+                _log(f"Scale set to {val_text}x — applying and restarting shell")
+                self._apply_display_scale_setting(val)
 
             elif label == "GPU":
                 val = text.lower()
@@ -4103,47 +4240,22 @@ class ShellWindow(Gtk.ApplicationWindow):
                 if val <= 0:
                     _log(f"Invalid font size: {val}, must be > 0")
                     return
-                global _menu_font_size
                 _menu_font_size = val
                 with open(_menu_font_size_file, "w") as f:
                     f.write(str(val))
-                m = self._m
-                css = f"""
-                #tab-label {{
-                    font-weight: {_menu_font_weight};
-                    font-size: {self._font_px(int(10 * val))}px;
-                }}
-                """
-                provider = Gtk.CssProvider()
-                provider.load_from_data(css.encode())
-                Gtk.StyleContext.add_provider_for_screen(
-                    Gdk.Screen.get_default(), provider,
-                    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+                self._apply_tab_font(val, _menu_font_weight)
                 opt['value_label'].set_text(f"{val:.1f}x")
-                _log(f"Menu font size set to {val}x")
 
             elif label == "Menu Font Weight":
                 val = int(text)
-                weights = [400, 600, 800]
-                if val not in weights:
-                    _log(f"Invalid font weight: {val}, must be one of {weights}")
+                if val not in (400, 600, 800):
+                    _log(f"Invalid font weight: {val}, must be 400/600/800")
                     return
+                _menu_font_weight = val
                 with open(_menu_font_weight_file, "w") as f:
                     f.write(str(val))
-                m = self._m
-                css = f"""
-                #tab-label {{
-                    font-weight: {val};
-                    font-size: {self._font_px(int(10 * _menu_font_size))}px;
-                }}
-                """
-                provider = Gtk.CssProvider()
-                provider.load_from_data(css.encode())
-                Gtk.StyleContext.add_provider_for_screen(
-                    Gdk.Screen.get_default(), provider,
-                    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+                self._apply_tab_font(_menu_font_size, val)
                 opt['value_label'].set_text(str(val))
-                _log(f"Menu font weight set to {val}")
 
         except ValueError:
             _log(f"Invalid input: {text}")
@@ -4165,6 +4277,7 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _set_tab(self, idx):
         if idx not in (0, 1, 2, 3):
             return
+        self._close_scale_dropdown()
         previous_tab = self.tab
         page_name = ("games", "apps", "settings", "all_games")[idx]
         page_label = ("Games", "Apps", "Settings", "All Games")[idx]
@@ -4446,11 +4559,13 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self.settings_rows[self.settings_opt]["widget"].queue_draw()
         return True
 
-    def _compose_background(self, pb):
+    def _compose_background(self, pb, heavy_shade=True):
         """Bake the page background into the pixbuf.
 
         Done at the pixbuf level (instead of a separate overlay widget) so the
         gradient can never stack above the content and cover UI elements.
+        heavy_shade=False is used for the custom PS background so the image
+        stays visible instead of being darkened to near-black on the left.
         """
         if not HAVE_CAIRO:
             return pb
@@ -4459,19 +4574,30 @@ class ShellWindow(Gtk.ApplicationWindow):
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
             _paint_settings_gradient(cairo.Context(surface), w, h)
             return Gdk.pixbuf_get_from_surface(surface, 0, 0, w, h)
-        if pb and pb.get_width() == w and pb.get_height() == h:
-            base = pb
-        else:
-            base = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, w, h)
-            base.fill(0x0d1117ff)
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
         cr = cairo.Context(surface)
-        Gdk.cairo_set_source_pixbuf(cr, base, 0, 0)
+        cr.set_source_rgb(0.051, 0.067, 0.090)  # 0d1117 fallback fill
         cr.paint()
+        if pb is not None:
+            # Scale-to-cover with Cairo so any pixbuf size works; the old
+            # exact-size check silently discarded the image on a 1px mismatch.
+            pw, ph = pb.get_width(), pb.get_height()
+            if pw > 0 and ph > 0:
+                scale = max(w / pw, h / ph)
+                cr.save()
+                cr.translate((w - pw * scale) / 2.0, (h - ph * scale) / 2.0)
+                cr.scale(scale, scale)
+                Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+                cr.paint()
+                cr.restore()
         grad = cairo.LinearGradient(0, 0, w, 0)
-        grad.add_color_stop_rgba(0.0, 0.02, 0.03, 0.05, 0.88)
-        grad.add_color_stop_rgba(0.55, 0.02, 0.03, 0.05, 0.55)
-        grad.add_color_stop_rgba(1.0, 0.02, 0.03, 0.05, 0.35)
+        if heavy_shade:
+            grad.add_color_stop_rgba(0.0, 0.02, 0.03, 0.05, 0.88)
+            grad.add_color_stop_rgba(0.55, 0.02, 0.03, 0.05, 0.55)
+            grad.add_color_stop_rgba(1.0, 0.02, 0.03, 0.05, 0.35)
+        else:
+            grad.add_color_stop_rgba(0.0, 0.02, 0.03, 0.05, 0.30)
+            grad.add_color_stop_rgba(1.0, 0.02, 0.03, 0.05, 0.10)
         cr.set_source(grad)
         cr.paint()
         return Gdk.pixbuf_get_from_surface(surface, 0, 0, w, h)
@@ -4480,8 +4606,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Show selected game's key art on Games tab; dark gradient elsewhere."""
         try:
             pb = None
-            if self.tab == 3:
-                # All Games page shares the Game Library tile's background
+            if self.tab in (1, 3):
+                # Apps and All Games share the Game Library tile's background
                 bg_path = os.path.expanduser(
                     "~/.config/console-de/icons/ps-background.png")
                 if os.path.isfile(bg_path):
@@ -4509,7 +4635,11 @@ class ShellWindow(Gtk.ApplicationWindow):
                             _log("BG art pixbuf failed")
                     else:
                         _log(f"No BG art found for appid={g.get('appid')}")
-            composed = self._compose_background(pb)
+            ps_bg = bool(pb is not None and (
+                self.tab in (1, 3) or
+                (self.tab == 0 and self.games and
+                 self.games[self.gsel].get('library'))))
+            composed = self._compose_background(pb, heavy_shade=not ps_bg)
             if composed:
                 self.bg_image.set_from_pixbuf(composed)
             else:
@@ -4650,6 +4780,9 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _nav_up(self):
         _log("Nav: Up")
+        if self._dd_widget is not None:
+            self._scale_dropdown_move(-1)
+            return
         if self.control_center_open:
             if self.control_center_power_open:
                 self._move_control_center_power_choice(-1)
@@ -4706,6 +4839,9 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _nav_down(self):
         _log("Nav: Down")
+        if self._dd_widget is not None:
+            self._scale_dropdown_move(1)
+            return
         if self.control_center_open:
             if self.control_center_power_open:
                 self._move_control_center_power_choice(1)
@@ -4749,6 +4885,9 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _nav_left(self):
         _log("Nav: Left")
+        if self._dd_widget is not None:
+            self._scale_dropdown_move(-3)  # jump up
+            return
         if self.control_center_open:
             if self.control_center_power_open:
                 self._move_control_center_power_choice(-1)
@@ -4804,6 +4943,9 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _nav_right(self):
         _log("Nav: Right")
+        if self._dd_widget is not None:
+            self._scale_dropdown_move(3)  # jump down
+            return
         if self.control_center_open:
             if self.control_center_power_open:
                 self._move_control_center_power_choice(1)
@@ -4860,6 +5002,10 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _nav_activate(self):
         _log("Nav: Activate (A/Enter)")
+        if self._dd_widget is not None:
+            self._play_sfx("PS5_Select")
+            self._commit_scale_dropdown()
+            return
         if self.control_center_open:
             if self.control_center_power_open:
                 self.control_center_power_buttons[
@@ -4896,7 +5042,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 # Enter does NOT change value rows (Left/Right cycles those),
                 # but action rows (Log Out, Shut Down) must confirm on Enter/A.
                 opt = self.settings_rows[self.settings_opt]
-                if opt['action'] and opt['callback']:
+                if (opt['action'] or opt.get('dropdown')) and opt['callback']:
                     self._play_sfx("PS5_Select")
                     opt['callback']()
 
@@ -4943,12 +5089,16 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _nav_next_tab(self):
         _log("Nav: Next Tab")
+        if self._dd_widget is not None:
+            return
         self._play_sfx("PS5_Change")
         order = (0, 1)
         self._set_tab(order[(order.index(self.tab) + 1) % len(order)] if self.tab in order else 0)
 
     def _nav_prev_tab(self):
         _log("Nav: Prev Tab")
+        if self._dd_widget is not None:
+            return
         self._play_sfx("PS5_Change")
         order = (0, 1)
         self._set_tab(order[(order.index(self.tab) - 1) % len(order)] if self.tab in order else 0)
@@ -4960,6 +5110,9 @@ class ShellWindow(Gtk.ApplicationWindow):
         games/apps tab -> no-op (stay)."""
         _log("Nav: Back (B/Esc)")
         self._play_sfx("PS5_Change")
+        if self._dd_widget is not None:
+            self._close_scale_dropdown()
+            return True
         if self.control_center_open:
             if self.control_center_power_open:
                 self.control_center_power_card.hide()
@@ -4991,6 +5144,25 @@ class ShellWindow(Gtk.ApplicationWindow):
         kv = event.keyval
         if kv == Gdk.KEY_Home:
             self._toggle_control_center()
+            return True
+        if self._dd_widget is not None:
+            # Display Scale dropdown owns the keyboard while it is open.
+            if kv == Gdk.KEY_Up:
+                self._nav_up()
+            elif kv == Gdk.KEY_Down:
+                self._nav_down()
+            elif kv == Gdk.KEY_Left:
+                self._nav_left()
+            elif kv == Gdk.KEY_Right:
+                self._nav_right()
+            elif kv in (Gdk.KEY_Page_Up, Gdk.KEY_KP_Page_Up):
+                self._scale_dropdown_move(-3)
+            elif kv in (Gdk.KEY_Page_Down, Gdk.KEY_KP_Page_Down):
+                self._scale_dropdown_move(3)
+            elif kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                self._nav_activate()
+            elif kv == Gdk.KEY_Escape:
+                self._nav_back()
             return True
         if self._controller_owner == "game" and not self.control_center_open:
             # Leave ordinary keyboard input to the foreground game too.
@@ -5038,6 +5210,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._nav_back(); return True
         # Settings options pane: type a value directly
         elif self.tab == 2 and self.settings_pane == 1:
+            if self._dd_widget is not None:
+                return True
             if self._is_printable_key(kv):
                 self._show_text_input_dialog(); return True
         return False
@@ -5823,8 +5997,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         ring_off = self._car_ring_off
         radius = self._sw_pct(1.2)  # rounded corners
         intro_elapsed = (
-            max(0.0, time.monotonic() - self._carousel_intro_start)
-            if self._carousel_intro_active else 0.0)
+            self._carousel_intro_elapsed if self._carousel_intro_active else 0.0)
 
         # Use the same selection-to-offset mapping as the animation target.
         # This keeps the first tile at the intended positions: initial inset,
@@ -5984,10 +6157,48 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _music_file(self):
         return os.path.expanduser("~/.config/console-de/sfx/PS5_Home_Menu.mp3")
 
+    def _kill_stale_music(self):
+        """Kill leftover home-music pipelines (ffmpeg/ffplay) from older shells."""
+        try:
+            menu = os.path.basename(self._music_file())
+        except Exception:
+            menu = "PS5_Home_Menu"
+        own_uid, me = os.getuid(), os.getpid()
+        victims = []
+        try:
+            entries = list(os.scandir("/proc"))
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.name.isdigit() or int(entry.name) == me:
+                continue
+            pid = int(entry.name)
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != own_uid:
+                    continue
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+            except OSError:
+                continue
+            if ((("ffmpeg" in cmd and "-stream_loop" in cmd and menu in cmd) or
+                 ("ffplay" in cmd and "-nodisp" in cmd and "-f s16le" in cmd
+                  and "-volume 25" in cmd) or
+                 (cmd.startswith("sh -c") and "ffplay" in cmd and menu in cmd))):
+                victims.append(pid)
+        for pid in victims:
+            for sig in (signal.SIGCONT, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+        if victims:
+            _log(f"Killed {len(victims)} stale music process(es)")
+
     def _start_music(self):
         """Play PS5_Home_Menu.mp3 looping during startup animation."""
         if self._music_proc is not None:
             return False
+        self._kill_stale_music()
         menu = self._music_file()
         if not os.path.isfile(menu):
             _log(f"Music file not found: {menu}")
@@ -6032,12 +6243,13 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _create_startup_screen(self, overlay):
         """PS5-inspired login transition with a soft light beam and fine motes."""
-        self.startup_screen = StartupAnimation()
+        self.startup_screen = StartupAnimation(
+            self._sw, self._sh, on_finished=self._hide_startup_screen)
         overlay.add_overlay(self.startup_screen)
         self.startup_screen.show_all()
-        # Keep the one-shot intro concise while leaving time for the dust to
-        # spread, settle, and hold before the home carousel takes over.
-        GLib.timeout_add_seconds(6, self._hide_startup_screen)
+        # Safety net only: the animation ends the intro itself when it
+        # reaches its duration, so it never drifts from what is on screen.
+        GLib.timeout_add_seconds(15, self._hide_startup_screen)
 
     def _hide_startup_screen(self):
         """Remove the startup screen overlay once services are ready."""
@@ -6057,6 +6269,11 @@ class ShellWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(100, self._play_home_sound)
         # Start the home screen transition (fade in UI over background)
         GLib.timeout_add(100, self._start_home_transition)
+        # Background scans wait until the intro is over so their thread work
+        # cannot steal frames from it.
+        self._steam_game_refresh_timer_id = GLib.timeout_add_seconds(
+            4, self._refresh_steam_game_list)
+        GLib.timeout_add_seconds(4, self._start_process_logging)
         return False
 
     def _start_home_transition(self):
@@ -6064,17 +6281,23 @@ class ShellWindow(Gtk.ApplicationWindow):
         if self._carousel_intro_started:
             return False
         self._carousel_intro_started = True
+        self.main_box.show()
+        self.topbar.show()
         self.main_box.set_opacity(1.0)
         self.topbar.set_opacity(0.0)
-        self._carousel_intro_start = time.monotonic()
+        self._carousel_intro_clock = _FrameTimer()
+        self._carousel_intro_elapsed = 0.0
         self._carousel_intro_active = True
         self.carousel.queue_draw()
         self._carousel_intro_id = self.carousel.add_tick_callback(
             self._on_carousel_intro_animate)
         return False
 
-    def _on_carousel_intro_animate(self, widget, _frame_clock, _user_data=None):
-        elapsed = time.monotonic() - self._carousel_intro_start
+    def _on_carousel_intro_animate(self, widget, frame_clock, _user_data=None):
+        # The draw handler reads this value, so tile positions come from the
+        # same frame timestamp as the tick rather than a later wall-clock read.
+        elapsed = self._carousel_intro_clock.advance(frame_clock)
+        self._carousel_intro_elapsed = elapsed
         progress = min(1.0, elapsed / self._carousel_intro_duration)
         widget.queue_draw()
         if progress >= 1.0:
@@ -6082,21 +6305,20 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._carousel_intro_id = None
             widget.queue_draw()
             self._start_topbar_fade()
-            return False
-        return True
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def _start_topbar_fade(self):
-        self._topbar_fade_start = time.monotonic()
+        self._topbar_fade_clock = _FrameTimer()
         self._topbar_fade_active = True
         self.topbar.set_opacity(0.0)
-        self._topbar_fade_id = GLib.timeout_add(
-            _ANIMATION_INTERVAL_MS, self._on_topbar_fade_animate)
+        self._topbar_fade_id = self.add_tick_callback(
+            self._on_topbar_fade_animate)
 
-    def _on_topbar_fade_animate(self):
-        elapsed = time.monotonic() - self._topbar_fade_start
+    def _on_topbar_fade_animate(self, _widget, frame_clock, _user_data=None):
+        elapsed = self._topbar_fade_clock.advance(frame_clock)
         progress = min(1.0, elapsed / self._topbar_fade_duration)
-        eased = _cubic_bezier_y(progress)
-        self.topbar.set_opacity(eased)
+        self.topbar.set_opacity(_cubic_bezier_y(progress))
         if progress >= 1.0:
             self._topbar_fade_active = False
             self._topbar_fade_id = None
@@ -6106,21 +6328,21 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._start_microphone_state_monitor()
             self._info_fade_delay_id = GLib.timeout_add(
                 int(self._info_fade_delay * 1000), self._start_info_box_fade)
-            return False
-        return True
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def _start_info_box_fade(self):
-        self._info_fade_start = time.monotonic()
+        self._info_fade_clock = _FrameTimer()
         self._info_fade_delay_id = None
         self.info_box.set_opacity(0.0)
         self.info_box.set_margin_bottom(
             self._info_box_base_margin_bottom + self._info_box_start_offset)
-        self._info_fade_id = GLib.timeout_add(
-            _ANIMATION_INTERVAL_MS, self._on_info_box_fade_animate)
+        self._info_fade_id = self.add_tick_callback(
+            self._on_info_box_fade_animate)
         return False
 
-    def _on_info_box_fade_animate(self):
-        elapsed = time.monotonic() - self._info_fade_start
+    def _on_info_box_fade_animate(self, _widget, frame_clock, _user_data=None):
+        elapsed = self._info_fade_clock.advance(frame_clock)
         progress = min(1.0, elapsed / self._info_fade_duration)
         eased = _cubic_bezier_y(progress)
         self.info_box.set_opacity(eased)
@@ -6130,8 +6352,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.info_box.set_margin_bottom(margin_bottom)
         if progress >= 1.0:
             self._info_fade_id = None
-            return False
-        return True
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def _play_home_sound(self):
         """Play PS5_Home.mp3 once over the looping menu music."""
@@ -6285,7 +6507,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         except Exception as e:
             _log(f"Failed to save game order: {e}")
 
-    def _schedule_promote(self, appid=None, name=None):
+    def _schedule_promote(self, appid=None, name=None, app=None):
         """Schedule promoting a recently launched item to the front after 5s.
 
         Cancels any pending promotion so only the most recent launch counts.
@@ -6297,6 +6519,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 pass
         self._promote_appid = appid
         self._promote_name = name
+        self._promote_app = app
         self._promote_timer_id = GLib.timeout_add_seconds(5, self._promote_launched)
 
     def _promote_launched(self):
@@ -6307,20 +6530,34 @@ class ShellWindow(Gtk.ApplicationWindow):
         """
         self._promote_timer_id = None
         changed = False
+        apps_changed = False
         if self._promote_appid is not None and self.games:
             changed = self._move_to_front(self.games, 'appid', self._promote_appid)
-        if self._promote_name is not None and self.apps:
-            changed = self._move_to_front(self.apps, 'name', self._promote_name) or changed
+        promote_app = getattr(self, "_promote_app", None)
+        if promote_app is not None and self.apps:
+            # Move that exact app (names are not unique across .desktop files).
+            idx = next((i for i, a in enumerate(self.apps)
+                        if a is promote_app), None)
+            if idx is not None and idx > 0:
+                self.apps.insert(0, self.apps.pop(idx))
+                apps_changed = True
+        elif self._promote_name is not None and self.apps:
+            apps_changed = self._move_to_front(
+                self.apps, 'name', self._promote_name)
         if changed:
             self.gsel = 0
-            self.asel = 0
             self._refresh_selection()
-            self._refresh_app_selection()
             self._save_game_order()
             self._load_carousel_pixbufs()
+        if apps_changed:
+            self.asel = 0
+            self._sync_app_tiles_to_order()
+            self._refresh_app_selection()
+        if changed or apps_changed:
             _log("Promoted recently launched item to front")
         self._promote_appid = None
         self._promote_name = None
+        self._promote_app = None
         return False  # one-shot timer
 
     def _find_steam_pid(self):
@@ -6536,13 +6773,18 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _launch_app(self):
         self._cancel_home_foreground_enforcement()
-        app = self.apps[self.asel]
+        app = self._selected_app()
+        if app is None:
+            return
         cmd = re.sub(r'%[fFuUdDnNickvm]', '', app.get('exec', '')).strip()
         if not cmd:
             _log(f"App has no exec: {app['name']}")
             return
         self._ensure_open_application_slot()
         _log(f"Launch app: {app['name']} -> {cmd}")
+        # Stop the menu music right away instead of waiting for a focus event
+        # (the shell can keep reporting focus while the app is still opening).
+        self._pause_music()
         # Let the launched app take the fullscreen layer and focus.
         self._set_shell_layer("bottom")
         self.set_keep_above(False)
@@ -6563,6 +6805,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._opened_applications.append(record)
             self._active_external_app = True
             self._active_external_launch_id = record["id"]
+            GLib.timeout_add(500, self._watch_external_app, record["id"], 0)
             # Background games remain registered and muted, but must not be
             # treated as the foreground audio/input owner while this app runs.
             self._active_game_appid = None
@@ -6576,7 +6819,66 @@ class ShellWindow(Gtk.ApplicationWindow):
             _log(f"App launch failed: {e}")
         GLib.timeout_add(4000, self._music_focus_check)
         # Promote recently opened item to front a few seconds after launch
-        self._schedule_promote(name=app.get('name'))
+        self._schedule_promote(name=app.get('name'), app=app)
+
+    def _watch_external_app(self, launch_id, misses):
+        """Poll a DE-launched app; when it closes, take the shell back.
+
+        This deliberately does not depend on _active_external_app: a stray
+        focus event can clear that flag while the shell is still demoted to
+        the background layer with the gamepad released.
+        """
+        if launch_id in self._finished_external_ids:
+            return False
+        record = next((r for r in self._opened_applications
+                       if r.get("id") == launch_id), None)
+        if record is not None and self._opened_application_is_running(record):
+            misses = 0
+        else:
+            misses += 1
+        if misses >= 3:  # ~1.5s of absence, ignores brief relaunch gaps
+            self._finish_external_app_session(launch_id)
+            return False
+        GLib.timeout_add(500, self._watch_external_app, launch_id, misses)
+        return False
+
+    def _finish_external_app_session(self, launch_id):
+        """Restore shell focus, keyboard and gamepad ownership after an app exits."""
+        if launch_id in self._finished_external_ids:
+            return False
+        self._finished_external_ids.add(launch_id)
+        _log(f"Launched app {launch_id} exited")
+        self._opened_applications = [
+            r for r in self._opened_applications if r.get("id") != launch_id]
+        # Something else (another app or a game) is now in front: leave it be.
+        other_app = (self._active_external_app and
+                     self._active_external_launch_id not in (None, launch_id))
+        game_in_front = bool(
+            self._active_game_appid and
+            not self._user_requested_de_foreground and
+            self._is_launched_game_running())
+        if other_app or game_in_front:
+            _log("Another app/game owns the foreground; shell left as is")
+            return False
+        _log("Reclaiming shell input after app exit "
+             f"(owner={self._controller_owner}, passthrough="
+             f"{self._gamepad_passthrough_active}, active={self.is_active()})")
+        self._active_external_app = False
+        self._active_external_launch_id = None
+        self._user_requested_de_foreground = False
+        self._set_controller_owner(
+            "control_center" if self.control_center_open else "de")
+        self._regrab_gamepad()
+        self.set_accept_focus(True)
+        self._set_shell_layer("overlay")
+        self.set_keep_above(True)
+        self.deiconify()
+        self._cancel_home_foreground_enforcement()
+        if not self.control_center_open:
+            self._schedule_home_foreground()
+        self._update_play_button_label()
+        self._resume_music()
+        return False
 
     def _play_selected(self):
         self._cancel_home_foreground_enforcement()
@@ -6818,7 +7120,13 @@ class ShellWindow(Gtk.ApplicationWindow):
         if pw > 0 and ph > 0:
             scale = max(w / pw, h / ph)
             nw, nh = max(1, int(pw * scale)), max(1, int(ph * scale))
-            pb_scaled = pb.scale_simple(nw, nh, GdkPixbuf.InterpType.BILINEAR)
+            # Scale once per size, not on every animation frame.
+            cache = getattr(self, "_launch_cover_scaled", None)
+            if cache is None or cache[0] != (nw, nh, id(pb)):
+                cache = ((nw, nh, id(pb)), pb.scale_simple(
+                    nw, nh, GdkPixbuf.InterpType.BILINEAR))
+                self._launch_cover_scaled = cache
+            pb_scaled = cache[1]
             # Center the scaled art
             x = max(0, (w - nw) // 2)
             y = max(0, (h - nh) // 2)
@@ -6878,6 +7186,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._launch_cover = None
             self._launch_cover_da = None
             self._launch_cover_art_pb = None
+            self._launch_cover_scaled = None
             self._launch_cover_clip_width = 0
             try:
                 if cover.get_parent() is self._overlay:
@@ -7048,52 +7357,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         if previous != owner:
             _log(f"Controller owner: {previous} -> {owner}")
 
-    def _log_controller_device_openers(self):
-        """Log same-user processes holding the gamepad event nodes open."""
-        paths = {os.path.realpath(dev.path) for dev in self._pad_devices}
-        if not paths:
-            _log("Controller opener probe: no event devices are registered")
-            return
-        found = set()
-        try:
-            proc_entries = os.scandir("/proc")
-        except OSError as exc:
-            _log(f"Controller opener probe unavailable: {exc}")
-            return
-        with proc_entries:
-            for proc_entry in proc_entries:
-                if not proc_entry.name.isdigit():
-                    continue
-                pid = proc_entry.name
-                fd_dir = os.path.join("/proc", pid, "fd")
-                try:
-                    fds = os.scandir(fd_dir)
-                except OSError:
-                    continue
-                with fds:
-                    for fd_entry in fds:
-                        try:
-                            target = os.path.realpath(
-                                os.readlink(fd_entry.path))
-                        except OSError:
-                            continue
-                        if target not in paths:
-                            continue
-                        try:
-                            with open(os.path.join("/proc", pid, "cmdline"),
-                                      "rb") as cmd_file:
-                                command = cmd_file.read(512).replace(
-                                    b"\0", b" ").decode("utf-8", "replace").strip()
-                        except OSError:
-                            command = "unknown command"
-                        item = (pid, target, command or "unknown command")
-                        if item not in found:
-                            found.add(item)
-                            _log(f"Controller device opener: pid={pid}, "
-                                 f"device={target}, command={item[2]}")
-        if not found:
-            _log("Controller opener probe: no readable process handles found")
-
     def _ungrab_gamepad(self):
         self._set_controller_owner("game")
         self._ungrab_gamepad_devices()
@@ -7159,7 +7422,9 @@ class ShellWindow(Gtk.ApplicationWindow):
             except Exception:
                 pass
             self._carousel_intro_id = None
-        for tick_attr in ("_orbit_timer_id", "_app_animation_source"):
+        for tick_attr in ("_orbit_timer_id", "_app_animation_source",
+                          "_topbar_fade_id", "_info_fade_id",
+                          "_status_notice_fade_id"):
             tick_id = getattr(self, tick_attr, None)
             if tick_id is not None:
                 try:
@@ -7171,8 +7436,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         _log("ShellWindow destroyed")
         if self._background_game_suspended:
             self._resume_background_game()
-        for attr in ("_topbar_fade_id",
-                     "_info_fade_delay_id", "_info_fade_id",
+        for attr in ("_info_fade_delay_id",
                      "_share_press_timer", "_gamepad_monitor_id",
                      "_gamepad_regrab_timer",
                      "_game_check_timer_id", "_background_audio_resume_timer",
@@ -7182,7 +7446,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                      "_cursor_hide_timer", "_focus_restore_timer",
                      "_microphone_monitor_id", "_settings_stats_timer_id",
                      "_process_log_timer_id", "_steam_game_refresh_timer_id",
-                     "_status_notice_fade_id", "_status_notice_dismiss_id"):
+                     "_status_notice_dismiss_id"):
             timer_id = getattr(self, attr, None)
             if timer_id is not None:
                 try:
@@ -7259,7 +7523,8 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _music_focus_check(self):
         """Resume if the DE still has focus 4s after a launch (launch failed/stayed)."""
-        if self.is_active() and not self._active_game_appid:
+        if (self.is_active() and not self._active_game_appid and
+                not self._active_external_app):
             self._resume_music()
         return False
 
@@ -7333,6 +7598,7 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _stop_music(self):
         if self._music_proc is None:
+            self._kill_stale_music()
             return
         pid = self._music_proc.pid
         try:
@@ -7358,6 +7624,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             os.unlink(self._music_pgid_file())
         except OSError:
             pass
+        self._kill_stale_music()
         _log("Music stopped")
 
     @staticmethod
@@ -7408,8 +7675,14 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Ignore incidental focus while a launched game owns the session."""
         _log("Focus: gained (DE)")
         if self._active_external_app:
+            _ext_id = self._active_external_launch_id
             self._active_external_app = False
             self._active_external_launch_id = None
+            _ext_rec = next((r for r in self._opened_applications
+                             if r.get("id") == _ext_id), None)
+            if (_ext_id is not None and (_ext_rec is None or
+                    not self._opened_application_is_running(_ext_rec))):
+                GLib.idle_add(self._finish_external_app_session, _ext_id)
             latest_game = self._latest_running_game_record()
             if latest_game is not None:
                 self._activate_game_record(latest_game)
@@ -7511,139 +7784,86 @@ class ShellWindow(Gtk.ApplicationWindow):
             if self._gamepad_passthrough_active:
                 self._regrab_gamepad()
             self.set_keep_above(True)
-            self._set_shell_layer("top")
+            # "top" switches the layer surface to on-demand keyboard mode, which
+            # in labwc drops keyboard focus a few seconds after an app closes.
+            # Keep the exclusive overlay layer that the app-exit path set up.
+            self._set_shell_layer("top" if self.control_center_open else "overlay")
             _log("DE layer restored after focus settled")
         return False
 
-        """Move the item whose items[i][key]==value to index 0 of items."""
-        for i, item in enumerate(items):
-            if item.get(key) == value:
-                if i == 0:
-                    return False  # already at front
-                items.pop(i)
-                items.insert(0, item)
-                return True
-        return False
-
-        """Apply persisted game order (promoted games stay at front across restarts)."""
-        order_file = os.path.expanduser("~/.config/console-de/game_order")
-        if not os.path.isfile(order_file):
-            return
-        try:
-            with open(order_file, "r") as f:
-                saved_appids = [line.strip() for line in f if line.strip()]
-        except Exception as e:
-            _log(f"Failed to read game order: {e}")
-            return
-        if not saved_appids:
-            return
-        # Build a lookup by appid
-        by_appid = {g.get('appid'): g for g in self.games}
-        ordered = []
-        for appid in saved_appids:
-            g = by_appid.get(appid)
-            if g:
-                ordered.append(g)
-        # Append any games not in the saved list (new games) at the end
-        for g in self.games:
-            if g not in ordered:
-                ordered.append(g)
-        if ordered != self.games:
-            self.games = ordered
-            _log(f"Restored saved game order ({len(saved_appids)} games)")
-            self.gsel = 0
-
-        """Persist current game order so promoted games stay at front."""
-        order_file = os.path.expanduser("~/.config/console-de/game_order")
-        try:
-            with open(order_file, "w") as f:
-                for g in self.games:
-                    aid = g.get('appid')
-                    if aid is not None:
-                        f.write(f"{aid}\n")
-        except Exception as e:
-            _log(f"Failed to save game order: {e}")
-
-        """Move the item whose items[i][key]==value to index 0 of items."""
-        for i, item in enumerate(items):
-            if item.get(key) == value:
-                if i == 0:
-                    return False  # already at front
-                items.pop(i)
-                items.insert(0, item)
-                return True
-        return False
-
-        """Apply persisted game order (promoted games stay at front across restarts)."""
-        order_file = os.path.expanduser("~/.config/console-de/game_order")
-        if not os.path.isfile(order_file):
-            return
-        try:
-            with open(order_file, "r") as f:
-                saved_appids = [line.strip() for line in f if line.strip()]
-        except Exception as e:
-            _log(f"Failed to read game order: {e}")
-            return
-        if not saved_appids:
-            return
-        # Build a lookup by appid
-        by_appid = {g.get('appid'): g for g in self.games}
-        ordered = []
-        for appid in saved_appids:
-            g = by_appid.get(appid)
-            if g:
-                ordered.append(g)
-        # Append any games not in the saved list (new games) at the end
-        for g in self.games:
-            if g not in ordered:
-                ordered.append(g)
-        if ordered != self.games:
-            self.games = ordered
-            _log(f"Restored saved game order ({len(saved_appids)} games)")
-            self.gsel = 0
-
-        """Persist current game order so promoted games stay at front."""
-        order_file = os.path.expanduser("~/.config/console-de/game_order")
-        try:
-            with open(order_file, "w") as f:
-                for g in self.games:
-                    aid = g.get('appid')
-                    if aid is not None:
-                        f.write(f"{aid}\n")
-        except Exception as e:
-            _log(f"Failed to save game order: {e}")
 
 class StartupAnimation(Gtk.DrawingArea):
-    """Full-screen cinematic startup animation drawn with Cairo."""
+    """Full-screen cinematic startup animation drawn with Cairo.
 
-    def __init__(self):
+    Everything static (background and lettering) is rendered once into cached
+    surfaces, so each frame only blits those and draws the moving particles.
+    Time comes from the GTK frame clock, which the compositor paces to the
+    display, so motion stays even at any refresh rate (60, 120, 144 Hz, VRR).
+    The animation reports its own completion instead of relying on a separate
+    wall-clock timer that could drift from what is on screen.
+    """
+
+    DURATION = 6.0        # total length of the intro, in animation seconds
+    WAVE_END = 1.0        # incoming wave finishes; the dust starts to spread
+    SPREAD_TIME = 3.8     # how long the dust takes to spread over the screen
+    TEXT_START = 1.0
+    TEXT_FINISH = 5.0
+    PARTICLE_COUNT = 140
+    GLOW_MIN_SIZE = 1.8   # particles at least this big get a soft glow
+
+    def __init__(self, width=0, height=0, on_finished=None):
         super().__init__()
+        self._on_finished = on_finished
+        self._clock = _FrameTimer()
+        self._t = 0.0
+        self._finished = False
+        self._cache_size = None
+        self._background = None
+        self._text_layer = None
+        self._text_geometry = None
+        self._text_edge = None   # x of the lettering's reveal edge
+        self._frame = []         # this frame's visible particles
+        self._gc_paused = False
         self.set_hexpand(True)
         self.set_vexpand(True)
         self.connect("draw", self._on_draw)
-        self._start_time = time.monotonic()
-        self._last_frame_time = 0.0
+        self.connect("size-allocate", self._on_size_allocate)
         self._particles = self._create_particles()
         self._glow_surfaces = {}
-        self._welcome_layout = None
-        self._welcome_size = None
-        # Follow GTK's frame clock instead of a free-running GLib timer. This
-        # avoids queuing redraws between display frames and reduces jitter.
+        if HAVE_CAIRO:
+            # Pre-render glow sprites and the static layers so no frame has
+            # to build them mid-animation.
+            for key in {p['glow_key'] for p in self._particles}:
+                self._glow_surface(*key)
+            if width > 0 and height > 0:
+                self._build_cache(width, height)
+        # A garbage-collection pass is a classic source of one dropped frame.
+        # Collect now and hold collection off until the intro ends.
+        gc.collect()
+        gc.disable()
+        self._gc_paused = True
         self._anim_id = self.add_tick_callback(self._on_animate)
 
     def stop_animation(self):
-        """Stop the frame callback as soon as the one-shot intro is removed."""
+        """Stop the frame callback and release the intro's cached surfaces."""
         if self._anim_id is not None:
             try:
                 self.remove_tick_callback(self._anim_id)
             except Exception:
                 pass
             self._anim_id = None
+        if self._gc_paused:
+            self._gc_paused = False
+            gc.enable()
+        self._background = None
+        self._text_layer = None
+        self._cache_size = None
+        self._frame = []
 
     def _create_particles(self):
         import random
         particles = []
-        for _ in range(72 if _LOW_PERF_MODE else 140):
+        for _ in range(self.PARTICLE_COUNT):
             if random.random() < 0.66:
                 final_x = min(1.0, max(0.0, random.gauss(0.39, 0.22)))
                 final_y = min(1.0, max(0.0, random.gauss(0.49, 0.25)))
@@ -7672,6 +7892,7 @@ class StartupAnimation(Gtk.DrawingArea):
                 'color': (1.0, 0.73, 0.54) if gold else (0.93, 0.95, 1.0),
                 'glow_key': (glow_radius, gold),
                 'twinkle': random.uniform(0.0, 2 * math.pi),
+                'rect': None,   # last invalidated pixel rect
             })
         return particles
 
@@ -7695,147 +7916,249 @@ class StartupAnimation(Gtk.DrawingArea):
         self._glow_surfaces[key] = surface
         return surface
 
-    def _get_welcome_layout(self, w, h):
-        size = (w, h)
-        if self._welcome_layout is not None and self._welcome_size == size:
-            return self._welcome_layout
-        metrics = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-        metrics_cr = cairo.Context(metrics)
+    # ---- Cached static layers ----
+
+    def _on_size_allocate(self, widget, allocation):
+        # Runs before the first draw, so a size that differs from the
+        # prewarmed one is rebuilt here instead of stalling a frame.
+        if HAVE_CAIRO and self._anim_id is not None:
+            self._build_cache(allocation.width, allocation.height)
+
+    def _build_cache(self, w, h):
+        w, h = int(w), int(h)
+        if w <= 1 or h <= 1 or (w, h) == self._cache_size:
+            return
+        # Opaque copy of the gradient, so each frame can blit it with
+        # OPERATOR_SOURCE (no read-modify-write of the destination).
+        background = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
+        _paint_settings_gradient(cairo.Context(background), w, h)
+        background.flush()
+        self._background = background
+        self._build_text_layer(w, h)
+        self._cache_size = (w, h)
+
+    def _build_text_layer(self, w, h):
+        """Render the 'Welcome' lettering (halo + gradient fill) once."""
         text = "Welcome"
-        metrics_cr.select_font_face("SF Compact Display", cairo.FONT_SLANT_NORMAL,
-                                    cairo.FONT_WEIGHT_BOLD)
+        font_size = h * 0.055
         font_options = cairo.FontOptions()
         font_options.set_antialias(cairo.ANTIALIAS_BEST)
         font_options.set_hint_style(cairo.HINT_STYLE_FULL)
         font_options.set_hint_metrics(cairo.HINT_METRICS_ON)
-        metrics_cr.set_font_options(font_options)
-        metrics_cr.set_font_size(h * 0.055)
-        ascent, descent, _height, _max_x_advance, _max_y_advance = (
-            metrics_cr.font_extents())
-        text_extents = metrics_cr.text_extents(text)
-        text_advance = text_extents[4]
-        layout = {
-            "text": text,
-            "width": text_advance,
-            "x_bearing": text_extents[0],
-            "text_height": text_extents[3],
-            "baseline": (h - ascent - descent) / 2.0 + ascent,
-            "ascent": ascent,
-            "descent": descent,
-            "font_options": font_options,
-            "font_size": h * 0.055,
-        }
-        self._welcome_layout = layout
-        self._welcome_size = size
-        return layout
+
+        scratch = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+        scratch.set_font_options(font_options)
+        scratch.select_font_face("SF Compact Display", cairo.FONT_SLANT_NORMAL,
+                                 cairo.FONT_WEIGHT_BOLD)
+        scratch.set_font_size(font_size)
+        ascent, descent, _height, _max_x, _max_y = scratch.font_extents()
+        advance = scratch.text_extents(text)[4]
+        left = (w - advance) / 2.0
+        baseline = (h - ascent - descent) / 2.0 + ascent
+        scratch.move_to(left, baseline)
+        scratch.text_path(text)
+        path = scratch.copy_path()
+
+        # The cached layer covers only the horizontal band the text occupies.
+        pad = max(8, int(h * 0.012))
+        band_top = max(0, int(baseline - ascent) - pad)
+        band_bottom = min(h, int(math.ceil(baseline + descent)) + pad)
+        band_h = max(1, band_bottom - band_top)
+
+        layer = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, band_h)
+        lcr = cairo.Context(layer)
+        lcr.translate(0, -band_top)
+
+        # A faint two-pass outline creates a soft halo, while the gradient
+        # fill keeps the letter edges crisp.
+        lcr.append_path(path)
+        lcr.set_source_rgba(1.0, 0.84, 0.70, 0.035)
+        lcr.set_line_width(max(5.0, h * 0.004))
+        lcr.stroke()
+        lcr.append_path(path)
+        lcr.set_source_rgba(0.93, 0.92, 0.88, 0.055)
+        lcr.set_line_width(max(2.0, h * 0.0018))
+        lcr.stroke()
+
+        gradient = cairo.LinearGradient(0, 0, w, 0)
+        gradient.add_color_stop_rgba(0.0, 0.99, 0.87, 0.77, 1.0)
+        gradient.add_color_stop_rgba(0.48, 0.91, 0.91, 0.91, 1.0)
+        gradient.add_color_stop_rgba(1.0, 0.73, 0.82, 0.96, 1.0)
+        lcr.append_path(path)
+        lcr.clip()
+        lcr.set_source(gradient)
+        lcr.paint()
+        layer.flush()
+
+        self._text_layer = layer
+        # x of the reveal start, full reveal span, band top, band height
+        self._text_geometry = (left - pad, advance + 2 * pad, band_top, band_h)
+
+    # ---- Animation ----
 
     def _on_animate(self, widget, frame_clock, user_data=None):
-        frame_time = frame_clock.get_frame_time() / 1_000_000.0
-        interval = _ANIMATION_INTERVAL_MS / 1000.0
-        if frame_time - self._last_frame_time >= interval:
-            self._last_frame_time = frame_time
-            self.queue_draw()
-        return True
+        # The frame clock fires once per display frame at whatever rate the
+        # display runs, and its timestamp is the frame's own, so motion
+        # advances evenly regardless of how long drawing took.
+        self._t = self._clock.advance(frame_clock)
+        self._step(self._t)
+        if self._t >= self.DURATION and not self._finished:
+            self._finished = True
+            self._anim_id = None
+            GLib.idle_add(self._notify_finished)
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _notify_finished(self):
+        if self._on_finished is not None:
+            self._on_finished()
+        else:
+            self.stop_animation()
+        return False
+
+    def _invalidate_particle(self, p, rect):
+        """Mark only the pixels this particle left and entered as dirty."""
+        old = p['rect']
+        p['rect'] = rect
+        if old is None and rect is None:
+            return
+        if old is None:
+            self.queue_draw_area(*rect)
+        elif rect is None:
+            self.queue_draw_area(*old)
+        else:
+            ox, oy, ow, oh = old
+            nx, ny, nw, nh = rect
+            ux, uy = min(ox, nx), min(oy, ny)
+            uw = max(ox + ow, nx + nw) - ux
+            uh = max(oy + oh, ny + nh) - uy
+            if uw * uh <= 4 * max(ow * oh, nw * nh):
+                self.queue_draw_area(ux, uy, uw, uh)
+            else:  # big jump: two small rects beat one huge one
+                self.queue_draw_area(*old)
+                self.queue_draw_area(*rect)
+
+    def _step(self, t):
+        """Work out this frame's scene and invalidate only what changed.
+
+        Redrawing the whole 2880x1800 surface every frame is what made the
+        intro stutter; the background never changes and the particles and
+        lettering touch a tiny fraction of it. GTK clips the draw handler to
+        the invalidated region, so only those pixels are repainted and
+        handed to the compositor.
+        """
+        w = self.get_allocated_width()
+        h = self.get_allocated_height()
+        if w <= 1 or h <= 1:
+            return
+
+        # Lettering: invalidate just the strip revealed since the last frame.
+        if t >= self.TEXT_START and self._text_geometry is not None:
+            progress = min(1.0, max(
+                0.0, (t - self.TEXT_START) / (self.TEXT_FINISH - self.TEXT_START)))
+            progress = 0.5 - 0.5 * math.cos(math.pi * progress)
+            x0, span, y0, band_h = self._text_geometry
+            edge = x0 + span * progress
+            prev = self._text_edge if self._text_edge is not None else x0
+            if edge != prev:
+                ix = int(math.floor(min(prev, edge))) - 2
+                iw = int(math.ceil(abs(edge - prev))) + 5
+                self.queue_draw_area(ix, y0, iw, band_h)
+            self._text_edge = edge
+
+        # Particles. The wave travels first; the dust then spreads across the
+        # screen, with subtle individual drift continuing to the last frame.
+        disperse = min(1.0, max(0.0, (t - self.WAVE_END) / self.SPREAD_TIME))
+        disperse = disperse * disperse * (3 - 2 * disperse)
+        settle = 1.0 - disperse
+        drift = 1.0 - math.exp(-t * 0.35)
+        two_pi = 2 * math.pi
+        floor = math.floor
+        frame = []
+
+        for p in self._particles:
+            wx = p['wave_x']
+            appeared = min(1.0, max(0.0, (t - wx * 0.82) / 0.16))
+            alpha = 0.0
+            if appeared > 0.0:
+                phase = p['twinkle']
+                twinkle = 0.58 + 0.42 * math.sin(t * 3.0 + phase)
+                alpha = p['base_alpha'] * appeared * twinkle
+            if alpha <= 0.004:
+                self._invalidate_particle(p, None)
+                continue
+
+            wave_y = (0.70 - 0.24 * wx +
+                      0.075 * math.sin(wx * two_pi - t * 0.65) +
+                      p['wave_y_offset'])
+            px = w * (wx * settle + p['x'] * disperse)
+            py = h * (wave_y * settle + p['y'] * disperse)
+            px += w * (p['drift_x'] * drift + 0.006 * math.sin(t * 0.72 + phase))
+            py += h * (p['drift_y'] * drift +
+                       0.0045 * math.sin(t * 0.55 + phase * 1.37))
+
+            glow = p['size'] >= self.GLOW_MIN_SIZE
+            ext = (p['glow_key'][0] if glow else p['size']) + 2.0
+            side = int(2 * ext) + 3
+            self._invalidate_particle(
+                p, (int(floor(px - ext)), int(floor(py - ext)), side, side))
+
+            r, g, b = p['color']
+            sprite = self._glow_surfaces[p['glow_key']] if glow else None
+            frame.append((px, py, p['size'], ext,
+                          alpha if p['gold'] else alpha * 0.88,
+                          r, g, b, sprite, alpha * 0.22))
+        self._frame = frame
 
     def _on_draw(self, widget, cr):
         w = widget.get_allocated_width()
         h = widget.get_allocated_height()
         if w <= 0 or h <= 0 or not HAVE_CAIRO:
             return False
+        if self._cache_size != (w, h) and self._anim_id is not None:
+            self._build_cache(w, h)  # fallback; normally built before frame 1
 
-        t = time.monotonic() - self._start_time
-        _paint_settings_gradient(cr, w, h)
+        # GTK has already clipped cr to the invalidated region; the extents
+        # let us skip anything entirely outside it.
+        cx1, cy1, cx2, cy2 = cr.clip_extents()
 
-        # Trace the whole word from left to right after the incoming wave has
-        # arrived. The lettering completes one second before this screen ends.
-        text_start = 1.0
-        text_finish = 5.0
-        if t >= text_start:
-            layout = self._get_welcome_layout(w, h)
-            draw_progress = min(1.0, max(
-                0.0, (t - text_start) / (text_finish - text_start)))
-            draw_progress = 0.5 - 0.5 * math.cos(math.pi * draw_progress)
-            cr.save()
-            cr.set_font_options(layout["font_options"])
-            cr.select_font_face("SF Compact Display", cairo.FONT_SLANT_NORMAL,
-                                cairo.FONT_WEIGHT_BOLD)
-            cr.set_font_size(layout["font_size"])
-            gradient = cairo.LinearGradient(0, 0, w, 0)
-            gradient.add_color_stop_rgba(0.0, 0.99, 0.87, 0.77, 1.0)
-            gradient.add_color_stop_rgba(0.48, 0.91, 0.91, 0.91, 1.0)
-            gradient.add_color_stop_rgba(1.0, 0.73, 0.82, 0.96, 1.0)
-            left = (w - layout["width"]) / 2.0
-            cr.move_to(left, layout["baseline"])
-            cr.text_path(layout["text"])
-            text_path = cr.copy_path()
-            cr.new_path()
-            cr.rectangle(left - layout["x_bearing"], 0,
-                         layout["width"] * draw_progress, h)
-            cr.clip()
-
-            # A faint two-pass outline creates a soft halo around the portion
-            # being written, while the gradient fill keeps the letter edges
-            # crisp.
-            cr.append_path(text_path)
-            cr.set_source_rgba(1.0, 0.84, 0.70, 0.035)
-            cr.set_line_width(max(5.0, h * 0.004))
-            cr.stroke()
-            cr.append_path(text_path)
-            cr.set_source_rgba(0.93, 0.92, 0.88, 0.055)
-            cr.set_line_width(max(2.0, h * 0.0018))
-            cr.stroke()
-
-            cr.append_path(text_path)
-            cr.clip()
-            cr.set_source(gradient)
+        if self._background is not None:
+            cr.set_operator(cairo.OPERATOR_SOURCE)
+            cr.set_source_surface(self._background, 0, 0)
             cr.paint()
-            cr.restore()
+            cr.set_operator(cairo.OPERATOR_OVER)
+        else:
+            _paint_settings_gradient(cr, w, h)
 
-        # The wave travels first; the particles then spread across the screen.
-        # Compute frame-wide easing once, not per mote.
-        # Let the incoming wave finish first, then spread the dust over 3.8s.
-        # Continue subtle individual drift after the spread completes so the
-        # cloud stays alive through the final frame of the intro.
-        disperse_progress = min(1.0, max(0.0, (t - 1.0) / 3.8))
-        disperse_progress = disperse_progress * disperse_progress * (3 - 2 * disperse_progress)
-        settle = 1.0 - disperse_progress
-        drift = 1.0 - math.exp(-t * 0.35)
-        glow_threshold = 3.4 if _LOW_PERF_MODE else 1.8
+        if self._text_layer is not None and self._text_edge is not None:
+            x0, span, y0, band_h = self._text_geometry
+            if cy2 > y0 and cy1 < y0 + band_h and cx1 < self._text_edge:
+                cr.save()
+                cr.rectangle(x0, y0, self._text_edge - x0, band_h)
+                cr.clip()
+                cr.set_source_surface(self._text_layer, 0, y0)
+                cr.paint()
+                cr.restore()
 
-        for particle in self._particles:
-            wx = particle['wave_x']
-            wave_y = (0.70 - 0.24 * wx +
-                      0.075 * math.sin(wx * 2 * math.pi - t * 0.65) +
-                      particle['wave_y_offset'])
-            appeared = min(1.0, max(0.0, (t - wx * 0.82) / 0.16))
-            px = w * (wx * settle + particle['x'] * disperse_progress)
-            py = h * (wave_y * settle + particle['y'] * disperse_progress)
-            phase = particle['twinkle']
-            px += w * (particle['drift_x'] * drift +
-                       0.006 * math.sin(t * 0.72 + phase))
-            py += h * (particle['drift_y'] * drift +
-                       0.0045 * math.sin(t * 0.55 + phase * 1.37))
-
-            twinkle = 0.58 + 0.42 * math.sin(t * 3.0 + particle['twinkle'])
-            alpha = particle['base_alpha'] * appeared * twinkle
-            color = particle['color']
-
-            if particle['size'] >= glow_threshold:
-                radius, gold = particle['glow_key']
-                sprite = self._glow_surface(radius, gold)
+        two_pi = 2 * math.pi
+        for (px, py, size, ext, fill_alpha,
+             r, g, b, sprite, glow_alpha) in self._frame:
+            if (px + ext < cx1 or px - ext > cx2 or
+                    py + ext < cy1 or py - ext > cy2):
+                continue
+            if sprite is not None:
                 center = sprite.get_width() / 2.0
                 cr.set_source_surface(sprite, px - center, py - center)
-                cr.paint_with_alpha(alpha * 0.22)
-
-            cr.set_source_rgba(*color, alpha if particle['gold'] else alpha * 0.88)
-            cr.arc(px, py, particle['size'], 0, 2 * math.pi)
+                cr.paint_with_alpha(glow_alpha)
+            cr.set_source_rgba(r, g, b, fill_alpha)
+            cr.arc(px, py, size, 0, two_pi)
             cr.fill()
 
         return False
 
+
 def main():
-    _log(f"=== Console DE shell starting (scale={_scale}x, "
-         f"low_perf={_LOW_PERF_MODE}) ===")
+    _log(f"=== Console DE shell starting (scale={_scale}x) ===")
     _log(f"Session started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     app = Gtk.Application(
