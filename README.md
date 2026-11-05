@@ -1,4 +1,4 @@
-# PS5 Shell
+# Console DE / PS5 Shell
 
 ![Linux](https://img.shields.io/badge/platform-Linux-4c9aff)
 ![Wayland](https://img.shields.io/badge/session-Wayland-7c4dff)
@@ -6,7 +6,7 @@
 
 **A controller-first desktop shell for Linux, built around labwc and Steam.**
 
-PS5 Shell presents installed Steam games and desktop applications in a couch-friendly Linux interface. It is designed for keyboard and gamepad navigation, with a Control Center, settings, screenshots, and optional screen recording. The GDM session and installed configuration keep the technical name **Console DE**.
+Console DE (technical name: `console-de`) presents installed Steam games and desktop applications in a couch-friendly Linux interface. It is designed for keyboard and gamepad navigation, with a Control Center, settings, screenshots, and optional screen recording.
 
 > This is an experimental personal project inspired by console interfaces. It is not affiliated with or endorsed by Sony, PlayStation, Valve, or GNOME.
 
@@ -20,7 +20,8 @@ PS5 Shell presents installed Steam games and desktop applications in a couch-fri
 - Startup and navigation animations, bundled sound cues, and controller/microphone status cards.
 - Screenshots through `grim`; region capture also uses `slurp`.
 - Optional long-press screen recording through `wf-recorder` when it is installed.
-- A diagnostic command that gathers session, audio, controller, and shell logs.
+- A diagnostic command (`console-de-doctor`) that gathers session, audio, controller, and shell logs.
+- An **All Games** grid page listing every installed Steam game.
 
 The DE launches Steam games through the signed-in Steam client. It does not request or store Steam credentials.
 
