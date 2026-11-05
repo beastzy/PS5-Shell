@@ -73,12 +73,7 @@ _env_scale = os.environ.get("GDK_SCALE", "unset")
 os.environ["GDK_SCALE"] = "1"
 os.environ["GDK_DPI_SCALE"] = "1"
 
-def _early_log(msg):
-    try:
-        with open(os.path.expanduser("~/.cache/console-de-shell.log"), "a") as _f:
-            _f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
-    except Exception:
-        pass
+
 
 
 def _wlr_read_outputs():
@@ -90,7 +85,6 @@ def _wlr_read_outputs():
         listing = subprocess.run([wlr], capture_output=True, text=True,
                                  timeout=8).stdout
     except Exception as exc:
-        _early_log(f"wlr-randr listing failed: {exc}")
         return None
     outputs, cur = [], None
     for line in listing.splitlines():
@@ -120,11 +114,9 @@ def _wlr_set_scale(names, scale):
             result = subprocess.run(
                 [wlr, "--output", name, "--scale", f"{scale:g}"],
                 capture_output=True, text=True, timeout=8)
-            _early_log(f"wlr-randr {name} --scale {scale:g}: "
                        f"rc={result.returncode} {result.stderr.strip()}")
             ok = ok or result.returncode == 0
         except Exception as exc:
-            _early_log(f"wlr-randr scale failed for {name}: {exc}")
     return ok
 
 
@@ -153,7 +145,6 @@ def _sync_output_scale_with_saved():
            if enabled and (scale is None or abs(scale - want) > 0.01)]
     if not bad:
         return False
-    _early_log(f"Output scale mismatch at startup ({bad}); applying {want:g}")
     if _wlr_set_scale(bad, want):
         time.sleep(0.6)  # let labwc resize the output before GTK reads it
         return True
@@ -171,7 +162,6 @@ except Exception:
 try:
     _sync_output_scale_with_saved()
 except Exception as _exc:
-    _early_log(f"Startup output scale sync failed: {_exc}")
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -196,7 +186,6 @@ def _layer_shell_available():
     try:
         return bool(GtkLayerShell.is_supported())
     except Exception as exc:
-        _log(f"Layer Shell support check failed; using GTK windows: {exc}")
         return False
 
 try:
@@ -212,12 +201,7 @@ try:
 except ImportError:
     HAVE_EVDEV = False
 
-def _log(msg):
-    try:
-        with open(os.path.expanduser("~/.cache/console-de-shell.log"), "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
-    except Exception:
-        pass
+
 
 
 _SETTINGS_GRADIENT_CACHE = {}
@@ -256,7 +240,6 @@ def _paint_settings_gradient(cr, w, h):
             surface.flush()
             _SETTINGS_GRADIENT_CACHE[key] = surface
         except Exception as exc:
-            _log(f"Reference gradient load failed: {exc}")
             _SETTINGS_GRADIENT_CACHE[key] = None
     surface = _SETTINGS_GRADIENT_CACHE[key]
     if surface is not None:
@@ -322,7 +305,6 @@ def sh(cmd):
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        _log(f"sh error: {e}")
 
 
 _SCALE_FILE = os.path.expanduser("~/.config/console-de/scale")
@@ -400,11 +382,8 @@ def take_screenshot():
             out = result.stdout.strip().splitlines()
             saved = out[-1] if out else ""
             if saved and os.path.exists(saved):
-                _log(f"screenshot saved: {saved}")
                 return saved
-            _log(f"console-de-screenshot failed: {result.stderr[:150]}")
         except Exception as e:
-            _log(f"console-de-screenshot error: {e}")
 
     # 2. grim directly (same tool the script uses)
     grim = _shutil.which("grim")
@@ -412,12 +391,9 @@ def take_screenshot():
         try:
             subprocess.run([grim, filename], timeout=8, check=True)
             if os.path.exists(filename):
-                _log(f"screenshot saved (grim): {filename}")
                 return filename
         except Exception as e:
-            _log(f"grim failed: {e}")
 
-    _log("no screenshot tool available (grim missing — run install.sh)")
     return None
 
 _LIB_CACHE = [0.0, []]
@@ -614,7 +590,6 @@ class GameTile(Gtk.DrawingArea):
     def _load_art(self):
         art = self._get_game_art()
         if art:
-            _log(f"Tile art found: {art}")
             try:
                 if self.game.get('library'):
                     # Store original unscaled pixbuf; scale dynamically at draw
@@ -624,13 +599,9 @@ class GameTile(Gtk.DrawingArea):
                 else:
                     self.pb = _cover_pixbuf(art, self.tile_w, self.tile_h)
                     if self.pb:
-                        _log(f"Tile art pixbuf created: {self.pb.get_width()}x{self.pb.get_height()}")
                     else:
-                        _log("Tile art pixbuf is None")
             except Exception as e:
-                _log(f"Tile art load failed: {e}")
         else:
-            _log(f"No tile art for {self.game.get('name')}")
 
     def _get_game_art(self):
         if self.game.get('library'):
@@ -764,7 +735,6 @@ def list_steam_games():
                     games.append({'name': name, 'appid': appid, 'steam': True})
             except Exception:
                 pass
-    _log(f"Found {len(games)} Steam games")
     return games
 
 def desktop_apps():
@@ -831,7 +801,6 @@ def desktop_apps():
         except (OSError, KeyError, configparser.Error, ValueError):
             continue
     apps.sort(key=lambda app: (app["name"].casefold(), app["desktop_id"].casefold()))
-    _log(f"Found {len(apps)} visible launchable desktop apps across "
          f"{len(by_id)} desktop entries")
     return apps
 
@@ -869,9 +838,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             if self._primary_monitor is not None:
                 try:
                     GtkLayerShell.set_monitor(self, self._primary_monitor)
-                    _log(f"Shell assigned to primary monitor {self._primary_monitor_idx}")
                 except Exception as exc:
-                    _log(f"Could not assign primary monitor to shell layer: {exc}")
             GtkLayerShell.set_keyboard_mode(
                 self, GtkLayerShell.KeyboardMode.ON_DEMAND)
             GtkLayerShell.set_exclusive_zone(self, -1)
@@ -880,7 +847,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 GtkLayerShell.set_anchor(self, edge, True)
         elif (HAVE_LAYER_SHELL and
               os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"):
-            _log("Compositor has no Layer Shell protocol; using standard GTK windows")
         # Keep the DE above startup applications such as Steam. Steam may show
         # a first-run/update window even when launched with -silent.
         self.set_keep_above(True)
@@ -925,7 +891,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._m = float(_scale) * resolution_factor
         global _render_scale
         _render_scale = self._m
-        _log(f"Screen: {self._sw}×{self._sh}, user_scale={_scale}x, "
              f"reference_factor={resolution_factor:.3f}, "
              f"effective_ui_scale={self._m:.3f}x")
 
@@ -1100,7 +1065,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._screen_record_path = None
         self._trig_prev = (0, 0)
 
-        _log(f"ShellWindow: {len(self.games)} games, {len(self.apps)} apps")
 
         # ---- Overlay layout: background art, gradient, content ----
         overlay = Gtk.Overlay()
@@ -1179,7 +1143,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(8000, self._verify_output_scale)
         # Ensure Steam is running in background (not suspended) for fast launches
         GLib.timeout_add(1500, self._ensure_steam_running)
-        _log("ShellWindow created")
 
     def _set_shell_layer(self, layer):
         if not self._shell_layer_shell:
@@ -1193,7 +1156,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                       if layer == "overlay" else
                       GtkLayerShell.KeyboardMode.ON_DEMAND))
         except Exception as exc:
-            _log(f"DE layer change failed: {exc}")
 
     def _sw_pct(self, pct):
         """Width as percentage of screen width."""
@@ -1214,7 +1176,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             window.set_cursor(cursor)
             self._pointer_cursor_visible = visible
         except Exception as exc:
-            _log(f"Pointer cursor visibility update failed: {exc}")
 
     def _on_pointer_motion(self, widget, event):
         self._set_pointer_cursor_visible(True)
@@ -1333,7 +1294,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 Gdk.Screen.get_default(), provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         except Exception as e:
-            _log(f"CSS failed: {e}")
 
     def _create_topbar(self, parent):
         topbar = Gtk.EventBox()
@@ -1417,7 +1377,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.clock_label.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(1, 1, 1, 1))
         self.clock_label.show()
         hbox.pack_start(self.clock_label, False, False, self._sw_pct(3))
-        _log(f"CLOCK created: text={self.clock_label.get_text()} visible={self.clock_label.get_visible()}")
 
         # Overlay child (not packed into a box): full window width, on top of content
         topbar.set_halign(Gtk.Align.FILL)
@@ -1505,7 +1464,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     GtkLayerShell.set_monitor(
                         self.control_center_window, self._primary_monitor)
                 except Exception as exc:
-                    _log(f"Could not assign Control Center to primary monitor: {exc}")
             GtkLayerShell.set_layer(
                 self.control_center_window, GtkLayerShell.Layer.OVERLAY)
             GtkLayerShell.set_exclusive_zone(self.control_center_window, -1)
@@ -1612,7 +1570,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     target_w, icon_height, GdkPixbuf.InterpType.BILINEAR)
                 image.set_from_pixbuf(pixbuf)
             except Exception as exc:
-                _log(f"Control center icon unavailable ({name}): {exc}")
             image.set_halign(Gtk.Align.CENTER)
             image.set_valign(Gtk.Align.CENTER)
 
@@ -1674,7 +1631,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         if self.control_center_window is not None:
             self.control_center_window.hide()
         self._update_control_center_selection()
-        _log("Control Center created as " +
              ("Wayland Layer Shell OVERLAY surface" if self.control_center_window
               else "in-window overlay (compositor lacks Layer Shell)"))
 
@@ -1746,12 +1702,10 @@ class ShellWindow(Gtk.ApplicationWindow):
             # corner of the widget tree visible under Labwc.
             window.show_all()
             window.present()
-            _log("Control Center layer set to OVERLAY (visible=True)")
         elif overlay is not None:
             overlay.show()
         self._update_control_center_selection()
         self._play_sfx("PS5_Control_Center")
-        _log("Control Center opened" +
              (" over foreground app; temporary controller capture active"
               if self._control_center_return_to_game else " over DE"))
 
@@ -1772,7 +1726,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             GtkLayerShell.set_layer(
                 self.control_center_window, GtkLayerShell.Layer.BOTTOM)
             self.control_center_window.hide()
-            _log("Control Center layer set to BOTTOM (visible=False)")
         elif self.control_center_overlay is not None:
             self.control_center_overlay.hide()
 
@@ -1788,17 +1741,14 @@ class ShellWindow(Gtk.ApplicationWindow):
             self.set_accept_focus(False)
             self._set_shell_layer("bottom")
             self.set_keep_above(False)
-            _log("Control Center closed; released controller capture to foreground app")
         elif preserve_underlay:
             self._set_controller_owner("de")
-            _log("Control Center closed; awaiting Labwc Home activation")
         else:
             self._set_controller_owner("de")
             if not self._user_requested_de_foreground:
                 self.set_accept_focus(True)
                 self._set_shell_layer("overlay")
                 self.set_keep_above(True)
-            _log("Control Center closed; DE remains the foreground layer")
         if play_sound:
             self._play_sfx("PS5_Control_Center")
         return False
@@ -1807,9 +1757,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Make Guide use the same Labwc shortcut as Super+Shift+Space."""
         if HAVE_EVDEV and self._send_labwc_keybind(
                 ecodes.KEY_SPACE, shift=True):
-            _log("Guide released; dispatched through Labwc Super+Shift+Space binding")
         else:
-            _log("Guide Super+Shift+Space dispatch unavailable; toggling Control Center directly")
             self._toggle_control_center()
         return False
 
@@ -1847,13 +1795,10 @@ class ShellWindow(Gtk.ApplicationWindow):
         name = self.control_center_items[index]["name"]
         self._play_sfx("PS5_Select")
         if index == 0:
-            _log("Control Center Home selected; dispatching Labwc Super+Tab")
             self._close_control_center(
                 return_to_game=False, preserve_underlay=True)
             if HAVE_EVDEV and self._send_labwc_keybind(ecodes.KEY_TAB):
-                _log("Control Center Home dispatched through Labwc Super+Tab binding")
             else:
-                _log("Control Center Super+Tab dispatch unavailable; using direct Home fallback")
                 self._bring_de_home(controller_already_owns_gamepad=True)
                 self._set_tab(0)
                 self._update_play_button_label()
@@ -1897,7 +1842,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.grab_focus()
         active = self.is_active()
         if attempt == 0 or (hold_home and attempt % 10 == 0):
-            _log(f"Home foreground attempt {attempt + 1}; mapped={self.get_mapped()}; "
                  f"DE active={active}; keyboard mode=exclusive")
         if hold_home:
             self._set_controller_owner("de")
@@ -1937,7 +1881,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             if not controller_already_owns_gamepad:
                 self._regrab_gamepad()
             else:
-                _log("Control Center controller grab retained by DE for Home")
             self._schedule_background_game_suspend()
             self._update_play_button_label()
         self.set_accept_focus(True)
@@ -1951,7 +1894,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self.grab_focus()
         self._resume_music()
         self._schedule_home_foreground()
-        _log("DE raised through the shared Home action")
         return False
 
     def _fullscreen_primary_monitor(self):
@@ -1968,7 +1910,6 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _send_labwc_keybind(self, key_code, shift=False):
         """Send a compositor keybind through uinput for labwc window actions."""
         if not HAVE_EVDEV:
-            _log("labwc window shortcut unavailable: python-evdev is missing")
             return False
         keyboard = None
         try:
@@ -2001,7 +1942,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             keyboard.syn()
             return True
         except Exception as exc:
-            _log(f"labwc window shortcut failed: {exc}")
             return False
         finally:
             if keyboard is not None:
@@ -2013,7 +1953,6 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _send_labwc_previous_window_immediate(self):
         """Ask labwc to focus the previous client without opening its switcher."""
         if not HAVE_EVDEV:
-            _log("Previous-window activation unavailable: python-evdev is missing")
             return False
         keyboard = None
         try:
@@ -2036,7 +1975,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             keyboard.syn()
             return True
         except Exception as exc:
-            _log(f"Previous-window activation failed: {exc}")
             return False
         finally:
             if keyboard is not None:
@@ -2052,9 +1990,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 not self._is_launched_game_running()):
             return False
         if self._send_labwc_previous_window_immediate():
-            _log("Resume sent Labwc PreviousWindowImmediate to focus the game")
         else:
-            _log("Resume could not dispatch Labwc PreviousWindowImmediate")
         return False
 
     def _schedule_background_game_suspend(self):
@@ -2080,14 +2016,12 @@ class ShellWindow(Gtk.ApplicationWindow):
         game_pids = self._find_launched_game_processes()
         pactl = shutil.which("pactl")
         if not pactl:
-            _log("Cannot mute background game audio: pactl is unavailable")
             return False
         try:
             result = subprocess.run([pactl, "list", "sink-inputs"],
                                     capture_output=True, text=True,
                                     timeout=3, check=True)
         except Exception as exc:
-            _log(f"Could not inspect background audio streams: {exc}")
             return False
 
         appid = str(self._active_game_appid or "")
@@ -2119,7 +2053,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._background_suspend_timer = GLib.timeout_add(
                     500, self._suspend_background_game)
             else:
-                _log("No game audio stream matched for muting")
             return False
 
         muted = 0
@@ -2130,10 +2063,8 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._background_muted_sink_inputs[sink_id] = was_muted
                 muted += 1
             except Exception as exc:
-                _log(f"Could not mute game audio stream {sink_id}: {exc}")
         self._background_game_suspended = False
         self._background_game_pids.clear()
-        _log(f"Muted {muted} background game audio stream(s); game kept running")
         return False
 
     def _resume_background_audio(self):
@@ -2146,7 +2077,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                                     capture_output=True, text=True,
                                     timeout=3, check=True)
         except Exception as exc:
-            _log(f"Could not inspect game audio streams for restore: {exc}")
             return
 
         game_pids = self._find_launched_game_processes()
@@ -2188,15 +2118,12 @@ class ShellWindow(Gtk.ApplicationWindow):
                     subprocess.run([pactl, "set-sink-input-volume", sink_id,
                                     "100%"], capture_output=True,
                                    timeout=3, check=True)
-                    _log(f"Game audio stream {sink_id} was at 0%; restored to 100%")
                 subprocess.run([pactl, "set-sink-input-mute", sink_id,
                                 "1" if was_muted else "0"],
                                capture_output=True, timeout=3, check=True)
                 self._background_muted_sink_inputs.pop(sink_id, None)
                 restored += 1
-                _log(f"Game audio stream {sink_id} restored (muted={was_muted})")
             except Exception as exc:
-                _log(f"Could not restore game audio stream {sink_id}: {exc}")
 
         # Drop IDs whose streams have disappeared. A short retry window catches
         # the delay between Steam raising the game and its audio stream opening.
@@ -2216,7 +2143,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._background_audio_resume_timer = GLib.timeout_add(
                     500, self._retry_background_audio_resume)
             else:
-                _log("No active game audio stream found after resume retries")
         else:
             self._background_audio_resume_attempts = 0
             if self._background_audio_resume_timer is not None:
@@ -2226,7 +2152,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     pass
                 self._background_audio_resume_timer = None
             if restored:
-                _log(f"Restored {restored} active game audio stream(s)")
 
     def _retry_background_audio_resume(self):
         self._background_audio_resume_timer = None
@@ -2236,7 +2161,6 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _resume_background_game(self):
         """Resume the game's processes after it was suspended behind the DE."""
         if not self._background_game_suspended:
-            _log("Background game was not suspended; skipping SIGCONT")
             return False
         pids = set(self._background_game_pids)
         pids.update(self._find_launched_game_processes())
@@ -2248,11 +2172,9 @@ class ShellWindow(Gtk.ApplicationWindow):
             except ProcessLookupError:
                 pass
             except OSError as exc:
-                _log(f"Could not resume game process {pid}: {exc}")
         self._background_game_pids.clear()
         self._background_game_suspended = False
         if resumed:
-            _log(f"Background game resumed ({resumed} process(es))")
         return resumed > 0
 
     def _schedule_home_foreground(self):
@@ -2323,7 +2245,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         try:
             return GdkPixbuf.Pixbuf.new_from_file(path)
         except Exception as exc:
-            _log(f"Status notice background load failed ({filename}): {exc}")
             return None
 
     def _paint_status_notice_background(self, cr, width, height, image):
@@ -2605,7 +2526,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _monitor_gamepad_connection(self):
         if self._pad_dev is not None and not os.path.exists(self._pad_dev.path):
-            _log(f"Controller input node disappeared: {self._pad_dev.path}")
             self._on_controller_disconnected()
         if self._pad_dev is None:
             try:
@@ -2613,7 +2533,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             except Exception as exc:
                 # A device can vanish between opening its event node and
                 # reading capabilities. Keep the hotplug monitor alive.
-                _log(f"Gamepad scan survived an input hotplug race: {exc}")
         return True
 
     def _pack_top_icon(self, parent, icon, spacing, circular_focus=False):
@@ -2975,7 +2894,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Launch a game from the All Games page and promote it to the
         front of the carousel."""
         appid = str(game.get('appid') or "")
-        _log(f"Launch from All Games: {game['name']} (appid={appid})")
 
         # Promote to front of carousel
         if appid and self.games:
@@ -3020,9 +2938,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 ["steam", "-silent", "-applaunch", appid],
                 env=_gpu_offload_env(), stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL)
-            _log(f"Launch command sent: {appid}")
         except Exception as e:
-            _log(f"Launch failed: {e}")
         self._resume_background_audio()
         self._schedule_promote(appid=appid)
 
@@ -3367,7 +3283,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 else:
                     message = f"Up to date · {latest}"
             except Exception as exc:
-                _log(f"Update check failed: {exc}")
                 message = "Check failed · try again"
             GLib.idle_add(self._finish_update_check, message)
 
@@ -3517,10 +3432,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._append_process_log_snapshot()
             self._process_log_timer_id = GLib.timeout_add_seconds(
                 30, self._append_process_log_snapshot)
-            _log(f"Process snapshots are being logged to {self._process_log_path}")
         except OSError as exc:
             self._process_log_path = None
-            _log(f"Could not start process logging: {exc}")
 
     def _append_process_log_snapshot(self):
         """Collect a complete process snapshot off the GTK thread."""
@@ -3567,7 +3480,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     writer = csv.writer(log_file)
                     writer.writerows((timestamp, *row) for row in rows)
             except OSError as exc:
-                _log(f"Could not collect process log snapshot: {exc}")
             finally:
                 self._process_log_scan_active = False
 
@@ -3875,7 +3787,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         """
         outputs = _wlr_read_outputs()
         if outputs is None:
-            _log("wlr-randr unavailable; fractional output scale not applied")
             return False
         names = [name for name, enabled, _scale in outputs if enabled]
         return _wlr_set_scale(names, scale) if names else False
@@ -3891,7 +3802,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                    if en and (sc is None or abs(sc - want) > 0.01)]
             if not bad or os.environ.get("CONSOLE_DE_SCALE_RETRY"):
                 return
-            _log(f"Output scale was reset after startup ({bad}); reapplying {want:g}")
             if _wlr_set_scale(bad, want):
                 os.environ["CONSOLE_DE_SCALE_RETRY"] = "1"  # only one retry
                 GLib.idle_add(self._schedule_shell_restart)
@@ -3911,10 +3821,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                     try:
                         proc.wait(timeout=15)
                     except subprocess.TimeoutExpired:
-                        _log("labwc scale helper still running after 15s")
-                _log(f"Requested labwc and app scale update to {scale}x")
             except Exception as exc:
-                _log(f"Could not start labwc scale update: {exc}")
             # Run after the helper so the exact value wins over any rounding.
             self._set_outputs_scale_wlr(scale)
             GLib.idle_add(self._schedule_shell_restart)
@@ -3935,7 +3842,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         for row in self.settings_rows:
             if row.get('dropdown') and row['label'].get_text() == "Display Scale":
                 row['value_label'].set_text(self._scale_row_text(value))
-        _log(f"Display/app scale changed to {text}x")
         self._apply_display_scale_setting(value)
 
     # ---- Display Scale dropdown ----
@@ -4021,7 +3927,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 if margin_y + height > self._overlay.get_allocated_height() - self._sh_pct(2):
                     margin_y = max(self._sh_pct(2), y - height)
         except Exception as exc:
-            _log(f"Scale dropdown placement fallback: {exc}")
         frame.set_margin_start(margin_x)
         frame.set_margin_top(margin_y)
 
@@ -4030,7 +3935,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         frame.show_all()
         self._refresh_scale_dropdown()
         GLib.idle_add(self._scroll_scale_dropdown)
-        _log("Scale dropdown opened")
 
     def _refresh_scale_dropdown(self):
         for i, ev in enumerate(self._dd_rows):
@@ -4073,7 +3977,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._dd_widget = None
         self._dd_rows = []
         self._dd_scroller = None
-        _log("Scale dropdown closed")
 
     def _commit_scale_dropdown(self):
         if self._dd_widget is None:
@@ -4091,7 +3994,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         return True
 
     def _restart_shell(self):
-        _log("shell re-exec to apply new scale")
         # exec keeps our PID, so the music group is not tied to a dying parent:
         # stop it here or the new shell starts a second copy and the old one
         # plays forever (even after logout).
@@ -4099,7 +4001,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         try:
             os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
         except Exception as e:
-            _log(f"restart failed: {e}")
         return False
 
     _SETTING_CHOICES = {
@@ -4119,7 +4020,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 Gdk.Screen.get_default(), provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         except Exception as e:
-            _log(f"menu font CSS failed: {e}")
 
     def _cycle_setting(self, key, step):
         """Step a GPU / menu font size / menu font weight choice and save it."""
@@ -4149,7 +4049,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 f"{value:.1f}x" if key == "size" else str(value))
         if len(self.settings_rows) > row:
             self.settings_rows[row]['value_label'].set_text(text)
-        _log(f"{key} setting changed to {value}")
 
     def _on_gpu_changed(self): self._cycle_setting("gpu", 1)
     def _on_gpu_changed_backward(self): self._cycle_setting("gpu", -1)
@@ -4216,29 +4115,24 @@ class ShellWindow(Gtk.ApplicationWindow):
                     val /= 100.0  # "165" or "165%" means 165%
                 val = round(val, 2)
                 if not 1.0 <= val <= 2.0:
-                    _log(f"Invalid scale: {val}, must be between 100% and 200%")
                     return
                 val_text = _format_scale(val)
                 with open(_SCALE_FILE, "w") as f:
                     f.write(val_text)
                 opt['value_label'].set_text(self._scale_row_text(val))
-                _log(f"Scale set to {val_text}x — applying and restarting shell")
                 self._apply_display_scale_setting(val)
 
             elif label == "GPU":
                 val = text.lower()
                 if val not in ("nvidia", "amd", "off"):
-                    _log(f"Invalid GPU: {val}, must be nvidia/amd/off")
                     return
                 with open(os.path.expanduser("~/.config/console-de/gpu"), "w") as f:
                     f.write(val)
                 opt['value_label'].set_text(val.upper())
-                _log(f"GPU set to {val}")
 
             elif label == "Menu Font Size":
                 val = float(text)
                 if val <= 0:
-                    _log(f"Invalid font size: {val}, must be > 0")
                     return
                 _menu_font_size = val
                 with open(_menu_font_size_file, "w") as f:
@@ -4249,7 +4143,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             elif label == "Menu Font Weight":
                 val = int(text)
                 if val not in (400, 600, 800):
-                    _log(f"Invalid font weight: {val}, must be 400/600/800")
                     return
                 _menu_font_weight = val
                 with open(_menu_font_weight_file, "w") as f:
@@ -4258,18 +4151,14 @@ class ShellWindow(Gtk.ApplicationWindow):
                 opt['value_label'].set_text(str(val))
 
         except ValueError:
-            _log(f"Invalid input: {text}")
         except Exception as e:
-            _log(f"Text input error: {e}")
 
     def _on_logout(self):
-        _log("Settings: Log Out")
         self._stop_music()
         sh(["pkill", "-TERM", "-x", "labwc"])
         self.destroy()
 
     def _on_shutdown(self):
-        _log("Settings: Shut Down")
         self._raw_hid_capture_stop.set()
         sh(["systemctl", "poweroff"])
         self.destroy()
@@ -4281,7 +4170,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         previous_tab = self.tab
         page_name = ("games", "apps", "settings", "all_games")[idx]
         page_label = ("Games", "Apps", "Settings", "All Games")[idx]
-        _log(f"Page: {page_label}")
         self.tab = idx
         if idx == 1:
             self._start_app_tile_build()
@@ -4319,7 +4207,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         elif idx == 3:
             self._refresh_all_games_selection()
         self._sync_background()
-        _log(f"Page: {page_label}")
 
     def _update_tab_focus_frame(self):
         """Show the white selection frame on the focused header item."""
@@ -4368,7 +4255,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                          if self.tab_focus_idx < len(self.TABS)
                          else ("Search", "Settings icon", "Profile")[
                              self.tab_focus_idx - len(self.TABS)])
-        _log(f"Tab menu focused: {focused_label}")
 
     def _leave_tab_bar(self, commit=False):
         """Leave tab focus, optionally switching to the focused tab."""
@@ -4403,7 +4289,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             label = self.TABS[idx]
         else:
             label = ("Search", "Settings icon", "Profile")[idx - len(self.TABS)]
-        _log(f"Header selection: {label}")
 
     def _draw_orbit_widget(self, widget, cr):
         """Draw the animated blue-violet selection frame over a widget."""
@@ -4613,7 +4498,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 if os.path.isfile(bg_path):
                     pb = _cover_pixbuf(bg_path, self._sw, self._sh)
                     if pb:
-                        _log("PS Background set as All Games background")
             elif self.tab == 0 and self.games:
                 g = self.games[self.gsel]
                 if g.get('library'):
@@ -4623,18 +4507,13 @@ class ShellWindow(Gtk.ApplicationWindow):
                     if os.path.isfile(bg_path):
                         pb = _cover_pixbuf(bg_path, self._sw, self._sh)
                         if pb:
-                            _log("PS Background set as DE background")
                 else:
                     art = _bg_art_for(g)
                     if art:
-                        _log(f"BG art found: {art}")
                         pb = _cover_pixbuf(art, self._sw, self._sh)
                         if pb:
-                            _log("BG art set on window")
                         else:
-                            _log("BG art pixbuf failed")
                     else:
-                        _log(f"No BG art found for appid={g.get('appid')}")
             ps_bg = bool(pb is not None and (
                 self.tab in (1, 3) or
                 (self.tab == 0 and self.games and
@@ -4645,7 +4524,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             else:
                 self.bg_image.clear()
         except Exception as e:
-            _log(f"bg sync failed: {e}")
 
     def _update_clock(self):
         text = time.strftime("%H:%M")
@@ -4670,14 +4548,11 @@ class ShellWindow(Gtk.ApplicationWindow):
                         size = self._font_px(22)
                         pb = pb.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR)
                         self.profile_pic.set_from_pixbuf(pb)
-                        _log(f"Profile picture loaded: {path}")
                         return
                 except Exception as e:
-                    _log(f"Failed to load profile picture {path}: {e}")
         # Fallback: user icon emoji
         self.profile_pic.clear()
         self.profile_pic.set_from_icon_name("system-users", Gtk.IconSize.DIALOG)
-        _log("Profile picture: using fallback icon")
 
     def _get_profile_pixbuf(self):
         """Return the user's account image for the control-center profile icon."""
@@ -4693,7 +4568,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 try:
                     return GdkPixbuf.Pixbuf.new_from_file(path)
                 except Exception as exc:
-                    _log(f"Failed to load control-center profile picture {path}: {exc}")
         return None
 
     def _load_icon(self, image_widget, name, size):
@@ -4703,9 +4577,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             pb = GdkPixbuf.Pixbuf.new_from_file(icon_path)
             pb = pb.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR)
             image_widget.set_from_pixbuf(pb)
-            _log(f"Icon loaded: {icon_path}")
         except Exception as e:
-            _log(f"Failed to load icon {icon_path}: {e}")
             image_widget.clear()
 
     def _update_game_info(self):
@@ -4755,10 +4627,8 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Play a short sound effect (non-blocking)."""
         path = os.path.expanduser(f"~/.config/console-de/sfx/{name}.mp3")
         if not os.path.isfile(path):
-            _log(f"SFX file not found: {path}")
             return
         if not shutil.which("ffplay"):
-            _log("SFX unavailable: ffplay is missing (install ffmpeg)")
             return
         try:
             cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
@@ -4774,12 +4644,10 @@ class ShellWindow(Gtk.ApplicationWindow):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
         except Exception as e:
-            _log(f"SFX play failed ({name}): {e}")
 
     # ---- Navigation ----
 
     def _nav_up(self):
-        _log("Nav: Up")
         if self._dd_widget is not None:
             self._scale_dropdown_move(-1)
             return
@@ -4838,7 +4706,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     self._enter_tab_bar()
 
     def _nav_down(self):
-        _log("Nav: Down")
         if self._dd_widget is not None:
             self._scale_dropdown_move(1)
             return
@@ -4884,7 +4751,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
 
     def _nav_left(self):
-        _log("Nav: Left")
         if self._dd_widget is not None:
             self._scale_dropdown_move(-3)  # jump up
             return
@@ -4942,7 +4808,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     self._play_sfx("PS5_Change")
 
     def _nav_right(self):
-        _log("Nav: Right")
         if self._dd_widget is not None:
             self._scale_dropdown_move(3)  # jump down
             return
@@ -5001,7 +4866,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     self._play_sfx("PS5_Change")
 
     def _nav_activate(self):
-        _log("Nav: Activate (A/Enter)")
         if self._dd_widget is not None:
             self._play_sfx("PS5_Select")
             self._commit_scale_dropdown()
@@ -5084,11 +4948,9 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _on_more_button_press(self, widget, event):
         """Handle More options button click — placeholder."""
-        _log("More options button pressed")
         return True
 
     def _nav_next_tab(self):
-        _log("Nav: Next Tab")
         if self._dd_widget is not None:
             return
         self._play_sfx("PS5_Change")
@@ -5096,7 +4958,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._set_tab(order[(order.index(self.tab) + 1) % len(order)] if self.tab in order else 0)
 
     def _nav_prev_tab(self):
-        _log("Nav: Prev Tab")
         if self._dd_widget is not None:
             return
         self._play_sfx("PS5_Change")
@@ -5108,7 +4969,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         settings options pane -> settings categories pane;
         settings categories pane -> games tab;
         games/apps tab -> no-op (stay)."""
-        _log("Nav: Back (B/Esc)")
         self._play_sfx("PS5_Change")
         if self._dd_widget is not None:
             self._close_scale_dropdown()
@@ -5182,16 +5042,13 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._nav_back()
             return True
         self._dismiss_toast()
-        _log(f"Key pressed: {Gdk.keyval_name(kv)}")
         # Ctrl+Alt+Delete = Log Out
         if (kv == Gdk.KEY_Delete
                 and (event.state & Gdk.ModifierType.CONTROL_MASK)
                 and (event.state & Gdk.ModifierType.MOD1_MASK)):
-            _log("Ctrl+Alt+Delete -> Logout")
             self._on_logout()
             return True
         if kv == Gdk.KEY_q and (event.state & Gdk.ModifierType.CONTROL_MASK):
-            _log("Ctrl+Q -> Quit")
             self.destroy()
             return True
         elif kv == Gdk.KEY_Right:
@@ -5221,7 +5078,6 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _init_gamepad(self):
         if not HAVE_EVDEV:
             if not getattr(self, "_evdev_unavailable_logged", False):
-                _log("evdev not available, gamepad disabled")
                 self._evdev_unavailable_logged = True
             return False
         if self._pad_dev is not None or self._gamepad_scan_in_progress:
@@ -5274,7 +5130,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         if now - self._last_gamepad_scan_log >= 10:
             detail = "; ".join(scan_errors[:4])
             suffix = "; ".join(part for part in (", ".join(names), detail) if part)
-            _log(f"No gamepad found in {device_count} readable input devices; "
                  f"retrying{': ' + suffix if suffix else ''}")
             self._last_gamepad_scan_log = now
         return False
@@ -5291,12 +5146,10 @@ class ShellWindow(Gtk.ApplicationWindow):
         if scan_errors:
             now = time.monotonic()
             if now - self._last_gamepad_scan_log >= 10:
-                _log("Some input nodes were unreadable: " + "; ".join(scan_errors[:4]))
                 self._last_gamepad_scan_log = now
 
         self._pad_dev = primary
         self._pad_devices = [primary]
-        _log(f"Gamepad found: {primary.name} ({primary.path})")
         primary_hardware = self._input_device_hardware_id(primary)
         info = getattr(primary, "info", None)
         if (getattr(info, "vendor", 0), getattr(info, "product", 0)) == (0x3537, 0x100B):
@@ -5324,11 +5177,9 @@ class ShellWindow(Gtk.ApplicationWindow):
                     watch_id = GLib.io_add_watch(
                         dev.fd, GLib.IO_IN, self._on_capture_readable)
                     self._capture_watch_ids.append(watch_id)
-                    _log(f"Capture-button companion found: {dev.name} "
                          f"({dev.path}), codes={sorted(codes)}")
                 else:
                     if codes:
-                        _log(f"Ignoring unrelated capture-capable input: "
                              f"{dev.name} ({dev.path})")
                     dev.close()
                 continue
@@ -5351,18 +5202,13 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._pad_src = watch_id
 
         if self._capture_button_codes:
-            _log(f"Dedicated capture button code(s): {sorted(self._capture_button_codes)}")
         if not self._capture_button_codes and not self._capture_devices:
-            _log("No recognized capture button on gamepad or companion input nodes")
         if self._gamepad_passthrough_active:
-            _log("Controller discovered while a game is focused; leaving it available to the game")
         else:
             try:
                 for dev in self._pad_devices:
                     dev.grab()
-                    _log(f"Controller interface grabbed by DE: {dev.path}")
             except Exception as e:
-                _log(f"Controller interface grab failed (may need permissions): {e}")
         self._on_controller_connected()
         return False
 
@@ -5444,7 +5290,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             connected = False
             nodes = self._raw_hid_capture_nodes(expected_hardware)
             if not nodes and time.monotonic() - last_missing_log >= 10:
-                _log("GameSir capture HID node not found for the connected controller")
                 last_missing_log = time.monotonic()
             for path, name in nodes:
                 if self._raw_hid_capture_stop.is_set():
@@ -5452,7 +5297,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 fd = None
                 try:
                     fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-                    _log(f"Opening GameSir capture HID: {name} ({path})")
                     probe_until = time.monotonic() + 1.5
                     last_heartbeat = 0.0
                     live = False
@@ -5479,7 +5323,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
                     connected = True
                     GLib.idle_add(self._set_raw_hid_capture_active, True, path)
-                    _log(f"GameSir Share held-state stream active: {path}")
                     last_heartbeat = 0.0
                     while not self._raw_hid_capture_stop.is_set():
                         now = time.monotonic()
@@ -5503,7 +5346,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     break
                 except (OSError, ValueError) as exc:
                     if time.monotonic() - last_error_log >= 10:
-                        _log(f"GameSir capture HID unavailable ({path}): {exc}")
                         last_error_log = time.monotonic()
                 finally:
                     if fd is not None:
@@ -5532,7 +5374,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         except BlockingIOError:
             pass
         except Exception as e:
-            _log(f"Pad read error: {e}")
             GLib.idle_add(self._on_controller_disconnected)
             return False
         return True
@@ -5552,7 +5393,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         except BlockingIOError:
             pass
         except Exception as exc:
-            _log(f"Capture-button input read failed ({dev.path}): {exc}")
             return False
         return True
 
@@ -5584,7 +5424,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         if code == ecodes.BTN_MODE:
             if value == 1:
                 self._guide_control_center_pending = True
-                _log("Guide pressed; waiting for release before Super+Shift+Space dispatch")
             elif value == 0 and self._guide_control_center_pending:
                 self._guide_control_center_pending = False
                 GLib.idle_add(self._dispatch_control_center_shortcut)
@@ -5595,11 +5434,9 @@ class ShellWindow(Gtk.ApplicationWindow):
         if owner == "game" and not self.control_center_open:
             if self._game_input_probe_remaining > 0:
                 self._game_input_probe_remaining -= 1
-                _log(f"Post-resume controller probe: EV_KEY code={code}, "
                      f"value={value}; DE observes the ungrabbed device")
             if (value == 1 and self._game_session_active and
                     self._launch_cover is not None):
-                _log(f"In-game controller input observed (code={code}); removing launch cover")
                 self._hide_launch_cover()
             return
         dpad_names = (
@@ -5635,30 +5472,24 @@ class ShellWindow(Gtk.ApplicationWindow):
 
         # A button (BTN_SOUTH / BTN_A) = activate
         if code == ecodes.BTN_SOUTH:
-            _log("Pad: A pressed")
             self._nav_activate()
 
         # B button (BTN_EAST) = back / undo previous input
         elif code == ecodes.BTN_EAST:
-            _log("Pad: B pressed -> back")
             self._nav_back()
 
         # Start (BTN_START) = home / reset to games tab
         elif code == ecodes.BTN_START:
-            _log("Pad: Start pressed -> home")
             self._set_tab(0)
 
         # L1 (BTN_TL) = previous tab
         elif code == ecodes.BTN_TL:
-            _log("Pad: L1 pressed")
             self._nav_prev_tab()
 
         # R1 (BTN_TR) = next tab
         elif code == ecodes.BTN_TR:
-            _log("Pad: R1 pressed")
             self._nav_next_tab()
         else:
-            _log(f"Pad: unmapped button event code={code}")
 
     def _handle_capture_button(self, code, value, source="unknown"):
         if value == 1 and self._share_press_timer is None:
@@ -5666,14 +5497,12 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._share_press_started = time.monotonic()
             self._share_press_timer = GLib.timeout_add(
                 700, self._on_share_long_press)
-            _log(f"Capture button pressed (code={code}, source={source})")
         elif value == 0:
             if self._share_press_timer is not None:
                 GLib.source_remove(self._share_press_timer)
                 self._share_press_timer = None
                 held_for = (time.monotonic() - self._share_press_started
                             if self._share_press_started is not None else 0)
-                _log(f"Capture button released after {held_for:.2f}s "
                      f"(code={code}, source={source})")
                 self._share_press_started = None
                 if not self._share_long_press_fired:
@@ -5689,7 +5518,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         if self._controller_owner == "game" and not self.control_center_open:
             if self._game_input_probe_remaining > 0:
                 self._game_input_probe_remaining -= 1
-                _log(f"Post-resume controller probe: EV_ABS code={code}, "
                      f"value={value}; DE observes the ungrabbed device")
             return
         # D-pad (ABS_HAT0X / ABS_HAT0Y)
@@ -5698,20 +5526,16 @@ class ShellWindow(Gtk.ApplicationWindow):
             new_x = 1 if value > 0 else (-1 if value < 0 else 0)
             if new_x != self._hat_state[0]:
                 if new_x > 0:
-                    _log("Pad: D-pad Right")
                     self._nav_right()
                 elif new_x < 0:
-                    _log("Pad: D-pad Left")
                     self._nav_left()
                 self._hat_state = (new_x, self._hat_state[1])
         elif code == ecodes.ABS_HAT0Y:
             new_y = 1 if value > 0 else (-1 if value < 0 else 0)
             if new_y != self._hat_state[1]:
                 if new_y > 0:
-                    _log("Pad: D-pad Down")
                     self._nav_down()
                 elif new_y < 0:
-                    _log("Pad: D-pad Up")
                     self._nav_up()
                 self._hat_state = (self._hat_state[0], new_y)
 
@@ -5728,7 +5552,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._share_press_timer = None
         self._share_long_press_fired = True
         self._share_press_started = None
-        _log("Capture button long-press threshold reached -> toggle recording")
         self._toggle_screen_recording()
         return False
 
@@ -5819,7 +5642,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
             GLib.idle_add(self._finish_screen_recording_action, action, None)
         except Exception as exc:
-            _log(f"Screen recording failed: {exc}")
             GLib.idle_add(
                 self._finish_screen_recording_action, None, str(exc))
 
@@ -5863,7 +5685,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _refresh_selection(self, prev=None):
         """Update game selection. prev = previous gsel (triggers carousel anim)."""
-        _log(f"Selected: {self.games[self.gsel]['name']}")
         self._update_game_info()
         self._update_play_button_label()
         if prev is not None and prev != self.gsel:
@@ -6135,7 +5956,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     if pixbuf is not None:
                         loaded[index] = pixbuf
                 except Exception as exc:
-                    _log(f"Carousel art decode failed for {game.get('appid')}: {exc}")
             GLib.idle_add(self._publish_carousel_pixbufs, generation, games, loaded)
 
         threading.Thread(target=load_art, name="carousel-art-loader",
@@ -6151,7 +5971,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._carousel_pixbufs[index] = loaded[index]
         if hasattr(self, "carousel"):
             self.carousel.queue_draw()
-        _log(f"Carousel art loaded off-thread: {len(self._carousel_pixbufs)} tiles")
         return False
 
     def _music_file(self):
@@ -6192,7 +6011,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except OSError:
                     pass
         if victims:
-            _log(f"Killed {len(victims)} stale music process(es)")
 
     def _start_music(self):
         """Play PS5_Home_Menu.mp3 looping during startup animation."""
@@ -6201,7 +6019,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._kill_stale_music()
         menu = self._music_file()
         if not os.path.isfile(menu):
-            _log(f"Music file not found: {menu}")
             return False
         inputs = ["-stream_loop", "-1", "-i", menu]
         graph = ("[0:a]aformat=sample_rates=48000:channel_layouts=stereo[out]")
@@ -6235,10 +6052,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 with open(self._music_pgid_file(), "w", encoding="ascii") as pgid_file:
                     pgid_file.write(f"{self._music_proc.pid}\n")
             except OSError as exc:
-                _log(f"Could not save home-music process group: {exc}")
-            _log(f"Music pipeline started: {menu}")
         except Exception as e:
-            _log(f"Music start failed: {e}")
         return False
 
     def _create_startup_screen(self, overlay):
@@ -6264,7 +6078,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._overlay.remove(self.startup_screen)
             except Exception:
                 pass
-            _log("Startup screen hidden")
         # Play PS5_Home.mp3 immediately after the startup animation ends
         GLib.timeout_add(100, self._play_home_sound)
         # Start the home screen transition (fade in UI over background)
@@ -6359,7 +6172,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Play PS5_Home.mp3 once over the looping menu music."""
         stinger = os.path.expanduser("~/.config/console-de/sfx/PS5_Home.mp3")
         if not os.path.isfile(stinger):
-            _log(f"Home sound not found: {stinger}")
             return False
         try:
             cmd = (f'ffmpeg -nostdin -loglevel quiet -i "{stinger}" '
@@ -6371,9 +6183,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 ["sh", "-c", cmd],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
-            _log("Home sound playing once over menu music")
         except Exception as e:
-            _log(f"Home sound failed: {e}")
         return False
 
 
@@ -6408,7 +6218,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             with open(order_file, "r") as f:
                 saved_appids = [line.strip() for line in f if line.strip()]
         except Exception as e:
-            _log(f"Failed to read game order: {e}")
             return
         if not saved_appids:
             return
@@ -6425,7 +6234,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 ordered.append(g)
         if ordered != self.games:
             self.games = ordered
-            _log(f"Restored saved game order ({len(saved_appids)} games)")
             self.gsel = 0
 
     def _refresh_steam_game_list(self):
@@ -6455,7 +6263,6 @@ class ShellWindow(Gtk.ApplicationWindow):
     def _finish_steam_game_refresh(self, discovered, error):
         self._steam_game_scan_in_progress = False
         if error is not None:
-            _log(f"Steam game-list refresh failed: {error}")
             return False
         try:
             selected_appid = (self.games[self.gsel].get("appid")
@@ -6490,9 +6297,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                     self._update_play_button_label()
                 if hasattr(self, "carousel"):
                     self.carousel.queue_draw()
-                _log(f"Steam game list refreshed: {len(self.games)} games")
         except Exception as exc:
-            _log(f"Steam game-list refresh update failed: {exc}")
         return False
 
     def _save_game_order(self):
@@ -6505,7 +6310,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     if aid is not None:
                         f.write(f"{aid}\n")
         except Exception as e:
-            _log(f"Failed to save game order: {e}")
 
     def _schedule_promote(self, appid=None, name=None, app=None):
         """Schedule promoting a recently launched item to the front after 5s.
@@ -6554,7 +6358,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._sync_app_tiles_to_order()
             self._refresh_app_selection()
         if changed or apps_changed:
-            _log("Promoted recently launched item to front")
         self._promote_appid = None
         self._promote_name = None
         self._promote_app = None
@@ -6583,11 +6386,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             else:
                 # Do not signal an unrelated session/process group.
                 os.kill(pid, signal.SIGCONT)
-            _log(f"Steam process resumed (pid={pid}, pgid={pgid})")
         except ProcessLookupError:
-            _log(f"Steam process {pid} exited before resume")
         except Exception as e:
-            _log(f"Steam resume failed (pid={pid}): {e}")
 
     def _ensure_steam_running(self):
         """Start Steam quietly in the background without freezing its client."""
@@ -6601,18 +6401,15 @@ class ShellWindow(Gtk.ApplicationWindow):
                 pid = proc.pid
                 # Let Steam finish initialization so later -applaunch requests
                 # can reach its client. The DE remains above it during startup.
-                _log(f"Steam started quietly in background (pid={pid})")
                 # Reassert the DE after the compositor has had time to process
                 # any window Steam created while starting.
                 GLib.timeout_add(700, self._restore_de_foreground)
                 GLib.timeout_add(1800, self._restore_de_foreground)
             except Exception as e:
-                _log(f"Steam start failed: {e}")
                 return False
         else:
             self._wake_steam_process(pid)
 
-        _log("Steam running in background")
         # This is a one-shot GLib timeout; do not start duplicate checks.
         return False
 
@@ -6623,13 +6420,10 @@ class ShellWindow(Gtk.ApplicationWindow):
             # let a stale callback raise the shell over a game launch.
             if (self._active_game_appid and
                     not self._user_requested_de_foreground):
-                _log("Skipped Steam startup foreground restore during game session")
                 return False
             self.set_keep_above(True)
             self.present()
-            _log("DE foreground restored after Steam startup")
         except Exception as e:
-            _log(f"DE foreground restore failed: {e}")
         return False
 
     def _opened_game_record(self, appid):
@@ -6678,7 +6472,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             if self._opened_application_is_running(record):
                 live.append(record)
             else:
-                _log(f"Opened app exited: {record.get('name', 'Unknown app')}")
         self._opened_applications = live
         return live
 
@@ -6701,7 +6494,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except ProcessLookupError:
                     pass
                 except OSError as exc:
-                    _log(f"Could not close oldest game process {pid}: {exc}")
         else:
             pgid = record.get("pgid")
             if pgid is not None:
@@ -6710,9 +6502,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except ProcessLookupError:
                     pass
                 except (OSError, TypeError, ValueError) as exc:
-                    _log(f"Could not close oldest app process group: {exc}")
 
-        _log(f"Closing oldest opened app: {name} "
              f"(kind={record.get('kind')}, appid={record.get('appid', '')})")
         GLib.timeout_add(2000, self._force_close_opened_application, record)
         if (record.get("kind") == "game" and
@@ -6743,7 +6533,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except ProcessLookupError:
                     pass
                 except OSError as exc:
-                    _log(f"Could not force-close game process {pid}: {exc}")
         else:
             pgid = record.get("pgid")
             if pgid is not None:
@@ -6752,8 +6541,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except ProcessLookupError:
                     pass
                 except (OSError, TypeError, ValueError) as exc:
-                    _log(f"Could not force-close app process group: {exc}")
-        _log(f"Evicted app close completed: {name}")
         return False
 
     def _latest_running_game_record(self):
@@ -6778,10 +6565,8 @@ class ShellWindow(Gtk.ApplicationWindow):
             return
         cmd = re.sub(r'%[fFuUdDnNickvm]', '', app.get('exec', '')).strip()
         if not cmd:
-            _log(f"App has no exec: {app['name']}")
             return
         self._ensure_open_application_slot()
-        _log(f"Launch app: {app['name']} -> {cmd}")
         # Stop the menu music right away instead of waiting for a focus event
         # (the shell can keep reporting focus while the app is still opening).
         self._pause_music()
@@ -6812,11 +6597,9 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._active_game_name = ""
             self._game_session_active = False
             self._user_requested_de_foreground = False
-            _log(f"Tracked opened app {record['id']}/"
                  f"{self._opened_application_limit}: {app['name']} "
                  f"(pid={process.pid})")
         except Exception as e:
-            _log(f"App launch failed: {e}")
         GLib.timeout_add(4000, self._music_focus_check)
         # Promote recently opened item to front a few seconds after launch
         self._schedule_promote(name=app.get('name'), app=app)
@@ -6847,7 +6630,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         if launch_id in self._finished_external_ids:
             return False
         self._finished_external_ids.add(launch_id)
-        _log(f"Launched app {launch_id} exited")
         self._opened_applications = [
             r for r in self._opened_applications if r.get("id") != launch_id]
         # Something else (another app or a game) is now in front: leave it be.
@@ -6858,9 +6640,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             not self._user_requested_de_foreground and
             self._is_launched_game_running())
         if other_app or game_in_front:
-            _log("Another app/game owns the foreground; shell left as is")
             return False
-        _log("Reclaiming shell input after app exit "
              f"(owner={self._controller_owner}, passthrough="
              f"{self._gamepad_passthrough_active}, active={self.is_active()})")
         self._active_external_app = False
@@ -6884,7 +6664,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         self._cancel_home_foreground_enforcement()
         g = self.games[self.gsel]
         if g.get('library'):
-            _log("Launch: Game Library - opening All Games")
             self._open_all_games()
             return
         if self._is_background_resume_selection():
@@ -6893,7 +6672,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             game_record = self._opened_game_record(appid)
             resume_specific_game = bool(
                 game_record is not None and previous_appid != appid)
-            _log(f"Resume background game: {g['name']} (appid={appid})")
             # Resuming counts as opening: bump it to the front of the carousel
             # (applied as soon as the DE loses focus to the game).
             self._schedule_promote(appid=appid)
@@ -6936,14 +6714,12 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._wake_steam_process(steam_pid)
             if remap_shell:
                 self.show()
-                _log("DE layer remapped to background before game resume")
             else:
                 # Without layer-shell support, changing keep-above does not
                 # reliably return keyboard focus beneath a fullscreen GTK
                 # window. Iconify the DE to force the compositor to reactivate
                 # the already-running game underneath it.
                 self.iconify()
-                _log("DE window iconified to return focus to the running game")
             if resume_specific_game:
                 # Steam routes an -applaunch request for an already-running
                 # AppID to that game's existing instance, allowing selection
@@ -6953,20 +6729,16 @@ class ShellWindow(Gtk.ApplicationWindow):
                         ["steam", "-silent", "-applaunch", appid],
                         env=_gpu_offload_env(), stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL, start_new_session=True)
-                    _log(f"Requested existing Steam game to foreground: {appid}")
                 except Exception as exc:
-                    _log(f"Could not foreground selected Steam game {appid}: {exc}")
             else:
                 # Preserve the established handoff for the most recently
                 # focused game; it avoids the task-switcher flash.
                 GLib.timeout_add(120, self._focus_previous_window_after_resume)
-                _log("Resume requested; scheduling explicit Labwc game focus")
             if self._game_check_timer_id is None:
                 self._game_check_timer_id = GLib.timeout_add(
                     200, self._check_game_launched)
             return
 
-        _log(f"Launch: {g['name']} (appid={g.get('appid')})")
         self._ensure_open_application_slot()
         self._user_requested_de_foreground = False
         self._active_game_appid = str(g.get('appid') or "")
@@ -6984,7 +6756,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             "last_seen": time.monotonic(),
         }
         self._opened_applications.append(game_record)
-        _log(f"Tracked opened app {game_record['id']}/"
              f"{self._opened_application_limit}: {game_record['name']} "
              f"(appid={game_record['appid']})")
         # The DE stays above Steam while browsing, but must yield the top
@@ -7001,9 +6772,7 @@ class ShellWindow(Gtk.ApplicationWindow):
                 ["steam", "-silent", "-applaunch", str(g['appid'])],
                 env=_gpu_offload_env(),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            _log("Launch command sent")
         except Exception as e:
-            _log(f"Launch failed: {e}")
         # Game audio can attach a little after its process starts. Retry
         # against the current stream IDs so launch never inherits a stale mute.
         self._resume_background_audio()
@@ -7013,7 +6782,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         """Show a compositor-level cover revealing game art from the left."""
         if self._launch_cover is not None:
             return
-        _log("LAUNCH COVER: shown")
         self._pause_music()
         self._launch_cover_clip_width = 0
         self._launch_cover_anim_id = None
@@ -7024,12 +6792,9 @@ class ShellWindow(Gtk.ApplicationWindow):
         if game:
             art = _bg_art_for(game)
             if art:
-                _log(f"LAUNCH COVER: art found for {game.get('name')}")
                 art_pb = _cover_pixbuf(art, self._sw, self._sh)
                 if art_pb:
-                    _log("LAUNCH COVER: art pixbuf created")
                 else:
-                    _log("LAUNCH COVER: art pixbuf failed")
         self._launch_cover_art_pb = art_pb
 
         use_layer_shell = self._shell_layer_shell
@@ -7046,7 +6811,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 try:
                     GtkLayerShell.set_monitor(cover, self._primary_monitor)
                 except Exception as exc:
-                    _log(f"Could not assign launch cover to primary monitor: {exc}")
             GtkLayerShell.set_layer(cover, GtkLayerShell.Layer.OVERLAY)
             GtkLayerShell.set_keyboard_mode(
                 cover, GtkLayerShell.KeyboardMode.NONE)
@@ -7062,7 +6826,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._launch_cover_da = da
             self._launch_cover = cover
             cover.show_all()
-            _log("LAUNCH COVER: using Wayland overlay layer")
         else:
             # X11 fallback: keep the cover in the shell window when the
             # layer-shell protocol is unavailable.
@@ -7169,7 +6932,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         return True
 
     def _hide_launch_cover(self):
-        _log("LAUNCH COVER: hidden")
         self._launch_show_time = None
         self._launch_cover_anim_start = None
         # Stop any in-progress animation
@@ -7205,9 +6967,7 @@ class ShellWindow(Gtk.ApplicationWindow):
             GtkLayerShell.set_layer(cover, GtkLayerShell.Layer.BOTTOM)
             GtkLayerShell.set_keyboard_mode(
                 cover, GtkLayerShell.KeyboardMode.NONE)
-            _log("LAUNCH COVER: moved below game layer")
         except Exception as exc:
-            _log(f"LAUNCH COVER: could not lower behind game: {exc}")
 
     def _get_running_procs(self):
         """Return dict of {pid: cmdline} for all running processes."""
@@ -7282,7 +7042,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except (OSError, PermissionError, ValueError):
                     pass
         except OSError as exc:
-            _log(f"Game process check failed: {exc}")
         return matches
 
     def _find_launched_game_processes(self):
@@ -7308,11 +7067,9 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._active_game_appid and self._is_launched_game_running())
         if game_running and self._launch_game_seen_at is None:
             self._launch_game_seen_at = time.monotonic()
-            _log("Launched game process detected")
         controller_passed_to_game = (
             game_running and self._gamepad_passthrough_active)
         if controller_passed_to_game and not self._game_handoff_confirmed:
-            _log("Game detected with controller passthrough; placing cover below game")
             # Keep the curtain above the shell but below normal fullscreen
             # application windows in the compositor stack.
             self._set_shell_layer("background")
@@ -7327,7 +7084,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 (self._game_session_active or
                  self._launch_game_seen_at is not None) and
                 self._game_exit_confirmed()):
-            _log("Launched game exited; clearing launch cover and reclaiming shell input")
             self._game_check_timer_id = None
             self._finish_game_session()
             return False
@@ -7355,7 +7111,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         previous = self._controller_owner
         self._controller_owner = owner
         if previous != owner:
-            _log(f"Controller owner: {previous} -> {owner}")
 
     def _ungrab_gamepad(self):
         self._set_controller_owner("game")
@@ -7370,13 +7125,10 @@ class ShellWindow(Gtk.ApplicationWindow):
             except Exception:
                 pass
             self._gamepad_regrab_timer = None
-        _log("Controller passthrough enabled for launched game")
         for dev in self._pad_devices:
             try:
                 dev.ungrab()
-                _log(f"Controller interface ungrabbed for game launch: {dev.path}")
             except Exception as e:
-                _log(f"Ungrab failed for {dev.path}: {e}")
 
     def _regrab_gamepad(self, attempt=0):
         """Take controller ownership back, retrying while the game releases it."""
@@ -7387,17 +7139,14 @@ class ShellWindow(Gtk.ApplicationWindow):
                 pass
         self._gamepad_regrab_timer = None
         if self._controller_owner == "game":
-            _log("Controller re-grab cancelled; game owns the top interaction layer")
             return False
         failures = []
         for dev in self._pad_devices:
             try:
                 dev.grab()
-                _log(f"Controller interface re-grabbed by DE: {dev.path}")
             except Exception as exc:
                 failures.append((dev, exc))
                 if attempt == 0 or attempt % 10 == 0:
-                    _log(f"Re-grab failed for {dev.path}: {exc}")
         if failures:
             self._gamepad_passthrough_active = True
             keep_retrying_for_home = bool(
@@ -7408,7 +7157,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                     100 if attempt < 30 else 500,
                     self._regrab_gamepad, attempt + 1)
             else:
-                _log("Controller reclaim still failing after 3 seconds; hotplug scan will retry")
             return False
         self._gamepad_passthrough_active = False
         return False
@@ -7432,8 +7180,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 except Exception:
                     pass
                 setattr(self, tick_attr, None)
-        _log("=== Session ended (Ctrl+Alt+Del or logout) ===")
-        _log("ShellWindow destroyed")
         if self._background_game_suspended:
             self._resume_background_game()
         for attr in ("_info_fade_delay_id",
@@ -7460,7 +7206,6 @@ class ShellWindow(Gtk.ApplicationWindow):
                 self._screen_record_proc.send_signal(signal.SIGINT)
                 self._screen_record_proc.wait(timeout=8)
             except Exception as e:
-                _log(f"Recording shutdown failed: {e}")
                 try:
                     self._screen_record_proc.terminate()
                 except Exception:
@@ -7503,9 +7248,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         try:
             os.killpg(self._music_proc.pid, signal.SIGSTOP)
             self._music_paused = True
-            _log("Music paused")
         except Exception as e:
-            _log(f"Music pause failed: {e}")
 
     def _resume_music(self):
         """Resume music when focus returns to the DE."""
@@ -7517,9 +7260,7 @@ class ShellWindow(Gtk.ApplicationWindow):
         try:
             os.killpg(self._music_proc.pid, signal.SIGCONT)
             self._music_paused = False
-            _log("Music resumed")
         except Exception as e:
-            _log(f"Music resume failed: {e}")
 
     def _music_focus_check(self):
         """Resume if the DE still has focus 4s after a launch (launch failed/stayed)."""
@@ -7580,7 +7321,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             if self._game_check_timer_id is None:
                 self._game_check_timer_id = GLib.timeout_add(
                     200, self._check_game_launched)
-            _log(f"Game exited; {next_game['name']} remains open in background")
         self._set_controller_owner(
             "control_center" if self.control_center_open else "de")
         self._regrab_gamepad()
@@ -7625,7 +7365,6 @@ class ShellWindow(Gtk.ApplicationWindow):
         except OSError:
             pass
         self._kill_stale_music()
-        _log("Music stopped")
 
     @staticmethod
     def _music_pgid_file():
@@ -7633,7 +7372,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _on_focus_out(self, widget, event):
         """DE lost focus; keep the launch curtain until the game is ready."""
-        _log("Focus: lost")
         if self.control_center_open:
             self._set_controller_owner("control_center")
         elif (self._user_requested_de_foreground and
@@ -7673,7 +7411,6 @@ class ShellWindow(Gtk.ApplicationWindow):
 
     def _on_focus_in(self, widget, event):
         """Ignore incidental focus while a launched game owns the session."""
-        _log("Focus: gained (DE)")
         if self._active_external_app:
             _ext_id = self._active_external_launch_id
             self._active_external_app = False
@@ -7713,12 +7450,10 @@ class ShellWindow(Gtk.ApplicationWindow):
         if self._game_session_active and self._active_game_appid:
             if (not self._is_launched_game_running() and
                     self._game_exit_confirmed()):
-                _log("DE focus returned after game process exited")
                 self._finish_game_session()
                 return False
         if (self._active_game_appid and not self._user_requested_de_foreground
                 and not self.control_center_open):
-            _log("Ignoring incidental DE focus during game session")
             self._pause_music()
             if self._focus_restore_timer is not None:
                 try:
@@ -7767,12 +7502,10 @@ class ShellWindow(Gtk.ApplicationWindow):
             self._active_game_name = ""
         if (self._active_game_appid and
                 not self._user_requested_de_foreground):
-            _log("Skipped DE foreground restore; game session has not been returned")
             return False
         if self.is_active():
             if (self._active_game_appid and not self._user_requested_de_foreground
                     and self._is_launched_game_running()):
-                _log("Focus returned temporarily while the launched game is still running")
                 if not self.control_center_open:
                     self.set_keep_above(False)
                     if not self._shell_layer_shell:
@@ -7788,7 +7521,6 @@ class ShellWindow(Gtk.ApplicationWindow):
             # in labwc drops keyboard focus a few seconds after an app closes.
             # Keep the exclusive overlay layer that the app-exit path set up.
             self._set_shell_layer("top" if self.control_center_open else "overlay")
-            _log("DE layer restored after focus settled")
         return False
 
 
@@ -8158,8 +7890,6 @@ class StartupAnimation(Gtk.DrawingArea):
 
 
 def main():
-    _log(f"=== Console DE shell starting (scale={_scale}x) ===")
-    _log(f"Session started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     app = Gtk.Application(
         application_id="com.console.de",
@@ -8186,16 +7916,12 @@ def main():
         screen = win.get_screen()
         scale = screen.get_monitor_scale(0) if hasattr(screen, 'get_monitor_scale') else 'N/A'
         win_scale = win.get_scale_factor() if hasattr(win, 'get_scale_factor') else 'N/A'
-        _log(f"Window scale_factor={win_scale}, monitor_scale={scale}, "
              f"GDK_SCALE={os.environ.get('GDK_SCALE')}")
-        _log("Window presented")
         libs = _steam_library_paths()
-        _log(f"Steam libraries: {libs}")
 
     def on_command_line(a, command_line):
         args = command_line.get_arguments()
         if "--control-center" in args:
-            _log("Control Center requested through shell command line")
             window = current_window["window"]
             if window is not None:
                 GLib.idle_add(window._toggle_control_center)
@@ -8215,8 +7941,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        _log(f"FATAL: {e}")
         import traceback
-        _log(traceback.format_exc())
         traceback.print_exc()
         sys.exit(1)
